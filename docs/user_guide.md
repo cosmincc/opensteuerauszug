@@ -314,6 +314,17 @@ opensteuerauszug process input.xml --importer ibkr --tax-year 2025 \
   -o final_tax_statement.pdf
 ```
 
+Both options can be repeated, and documents are added in the order given. Each value may also be a
+glob pattern (`*`, `?`, `[...]`, and `**` for recursive matching). A pattern is expanded to all matching
+files, sorted by path, so the order is predictable. Quote the pattern so OpenSteuerAuszug expands it
+rather than your shell (this also makes it work on Windows). A pattern that matches no file is an error.
+
+```bash
+opensteuerauszug process input.xml --importer ibkr --tax-year 2025 \
+  --post-amble 'statements/2025/*.pdf' \
+  -o final_tax_statement.pdf
+```
+
 **Note:** This is a straightforward concatenation. Added pages are not re-formatted and do not receive generated headers/footers or barcodes.
 
 ---

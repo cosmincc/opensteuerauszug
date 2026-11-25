@@ -5,7 +5,7 @@ from unittest.mock import patch
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 
-from opensteuerauszug.steuerauszug import app
+from opensteuerauszug.steuerauszug import app, expand_amble_paths
 
 runner = CliRunner()
 
@@ -164,3 +164,115 @@ def test_cli_concatenation_failure_cleanup(tmp_path, dummy_xml, pre_amble_pdf):
     # Check that temp file is cleaned up
     temp_file = output_pdf.with_suffix(".tmp_main.pdf")
     assert not temp_file.exists()
+
+
+def _run_process_with_ambles(tmp_path, dummy_xml, output_pdf, amble_args):
+    with patch("opensteuerauszug.steuerauszug.render_tax_statement") as mock_render:
+
+        def side_effect(statement, output_path, **kwargs):
+            create_dummy_pdf(Path(output_path), pages=3)
+            return Path(output_path)
+
+        mock_render.side_effect = side_effect
+
+        with patch("opensteuerauszug.steuerauszug.TotalCalculator") as MockTotalCalculator:
+            MockTotalCalculator.return_value.calculate.side_effect = lambda x: x
+
+            return runner.invoke(
+                app,
+                [
+                    "process",
+                    str(dummy_xml),
+                    "--output",
+                    str(output_pdf),
+                    "--raw-import",
+                    "--phases",
+                    "render",
+                    *amble_args,
+                    "--tax-year",
+                    "2023",
+                    "--period-from",
+                    "2023-01-01",
+                    "--period-to",
+                    "2023-12-31",
+                    "--tax-calculation-level",
+                    "none",
+                ],
+            )
+
+
+def test_expand_amble_paths_keeps_literal_paths(tmp_path):
+    missing = tmp_path / "does_not_exist_yet.pdf"
+    existing = tmp_path / "existing.pdf"
+    create_dummy_pdf(existing)
+
+    # Literal paths are passed through untouched, even if missing; the
+    # existence check happens later with its own error message.
+    assert expand_amble_paths([existing, missing], "--pre-amble") == [existing, missing]
+    assert expand_amble_paths(None, "--pre-amble") == []
+
+
+def test_expand_amble_paths_sorts_matches_and_keeps_argument_order(tmp_path):
+    stmts = tmp_path / "stmts"
+    stmts.mkdir()
+    for name in ["b.pdf", "c.pdf", "a.pdf", "notes.txt"]:
+        (stmts / name).write_bytes(b"")
+    (stmts / "sub.pdf").mkdir()  # directories are never matched
+    first = tmp_path / "first.pdf"
+
+    result = expand_amble_paths([first, stmts / "*.pdf", stmts / "a.pdf"], "--post-amble")
+
+    assert result == [
+        first,
+        stmts / "a.pdf",
+        stmts / "b.pdf",
+        stmts / "c.pdf",
+        stmts / "a.pdf",
+    ]
+
+
+def test_expand_amble_paths_recursive_glob(tmp_path):
+    (tmp_path / "x" / "y").mkdir(parents=True)
+    (tmp_path / "x" / "top.pdf").write_bytes(b"")
+    (tmp_path / "x" / "y" / "deep.pdf").write_bytes(b"")
+
+    result = expand_amble_paths([tmp_path / "x" / "**" / "*.pdf"], "--post-amble")
+
+    assert result == [tmp_path / "x" / "top.pdf", tmp_path / "x" / "y" / "deep.pdf"]
+
+
+def test_cli_concatenation_with_glob(tmp_path, dummy_xml):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    create_dummy_pdf(docs / "pre_1.pdf", pages=1)
+    create_dummy_pdf(docs / "pre_2.pdf", pages=2)
+    create_dummy_pdf(docs / "post_1.pdf", pages=4)
+    output_pdf = tmp_path / "output.pdf"
+
+    result = _run_process_with_ambles(
+        tmp_path,
+        dummy_xml,
+        output_pdf,
+        ["--pre-amble", str(docs / "pre_*.pdf"), "--post-amble", str(docs / "post_*.pdf")],
+    )
+
+    print(result.stdout)
+    assert result.exit_code == 0
+    assert "Prepending 2 document(s)" in result.stdout
+    # 1 + 2 pages pre + 3 pages main + 4 pages post = 10 pages
+    assert len(PdfReader(output_pdf).pages) == 10
+
+
+def test_cli_glob_without_matches_fails(tmp_path, dummy_xml):
+    output_pdf = tmp_path / "output.pdf"
+
+    result = _run_process_with_ambles(
+        tmp_path,
+        dummy_xml,
+        output_pdf,
+        ["--post-amble", str(tmp_path / "nothing_*.pdf")],
+    )
+
+    assert result.exit_code == 1
+    assert "--post-amble pattern matched no files" in result.stdout
+    assert not output_pdf.exists()
