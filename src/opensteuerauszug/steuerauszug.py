@@ -1,4 +1,6 @@
+import glob
 import logging
+import os
 import typer
 import sys
 from enum import Enum
@@ -101,6 +103,31 @@ default_phases = [
 _COMMAND_DEFAULT_PHASES = {
     'verify': [Phase.VERIFY],
 }
+
+
+_GLOB_MAGIC_CHARS = ("*", "?", "[")
+
+
+def expand_amble_paths(paths: Optional[List[Path]], option_name: str) -> List[Path]:
+    """Expand glob patterns in pre/post-amble paths.
+
+    Entries without glob characters are kept as-is (existence is checked later).
+    Entries with glob characters are expanded (``**`` is recursive) and the
+    matches are sorted by path so the resulting order is stable. A pattern that
+    matches no file is an error.
+    """
+    expanded: List[Path] = []
+    for path in paths or []:
+        pattern = os.path.expanduser(str(path))
+        if not any(ch in pattern for ch in _GLOB_MAGIC_CHARS):
+            expanded.append(path)
+            continue
+        matches = sorted(m for m in glob.glob(pattern, recursive=True) if os.path.isfile(m))
+        if not matches:
+            print(f"Error: {option_name} pattern matched no files: {path}")
+            raise typer.Exit(code=1)
+        expanded.extend(Path(m) for m in matches)
+    return expanded
 
 
 @app.command("process")
@@ -213,10 +240,20 @@ def process(
         help="Control how broker withholding evidence is used: OFF disables adjustments, CAP (default) caps Kursliste (Q) withholding at the broker's effective level.",
     ),
     pre_amble: Optional[List[Path]] = typer.Option(
-        None, "--pre-amble", help="List of PDF documents to add before the main steuerauszug."
+        None,
+        "--pre-amble",
+        help=(
+            "PDF document(s) to add before the main steuerauszug. Can be repeated. "
+            "Glob patterns (e.g. 'statements/*.pdf') are expanded in sorted order."
+        ),
     ),
     post_amble: Optional[List[Path]] = typer.Option(
-        None, "--post-amble", help="List of PDF documents to add after the main steuerauszug."
+        None,
+        "--post-amble",
+        help=(
+            "PDF document(s) to add after the main steuerauszug. Can be repeated. "
+            "Glob patterns (e.g. 'statements/*.pdf') are expanded in sorted order."
+        ),
     ),
 ):
     """Processes financial data to generate a Swiss tax statement (Steuerauszug)."""
@@ -224,6 +261,8 @@ def process(
     # Suppress pypdf warnings to avoid cluttering output with benign warnings
     # about rotated text and other PDF layout issues
     logging.getLogger('pypdf').setLevel(logging.ERROR)
+    pre_amble = expand_amble_paths(pre_amble, "--pre-amble")
+    post_amble = expand_amble_paths(post_amble, "--post-amble")
     reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
     if callable(reconfigure_stdout):
         reconfigure_stdout(
