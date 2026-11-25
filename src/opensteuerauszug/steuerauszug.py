@@ -12,6 +12,7 @@ from .config.models import (
     IbkrAccountSettings,
     FidelityAccountSettings,
     DegiroAccountSettings,
+    Trading212AccountSettings,
 )
 from .render.translations import DEFAULT_LANGUAGE
 from .core.identifier_loader import SecurityIdentifierMapLoader
@@ -27,6 +28,7 @@ from .calculate.fill_in_tax_value_calculator import FillInTaxValueCalculator
 from .calculate.payment_reconciliation_calculator import PaymentReconciliationCalculator
 from .calculate.withholding_cap_calculator import WithholdingCapCalculator
 from .util.known_issues import is_known_issue
+from .importers.trading212.trading212_importer import Trading212Importer
 from .core.exchange_rate_provider import ExchangeRateProvider
 from .core.kursliste_manager import KurslisteManager
 from .core.kursliste_exchange_rate_provider import KurslisteExchangeRateProvider
@@ -67,6 +69,7 @@ class ImporterType(str, Enum):
     IBKR = "ibkr"
     FIDELITY = "fidelity"
     DEGIRO = "degiro"
+    TRADING212 = "trading212"
     NONE = "none"
 
 
@@ -311,7 +314,9 @@ def process(
     all_fidelity_account_settings_models: List[FidelityAccountSettings] = []
     all_schwab_account_settings_models: List[SchwabAccountSettings] = []
     all_ibkr_account_settings_models: List[IbkrAccountSettings] = []
+    all_trading212_account_settings_models: List[Trading212AccountSettings] = []
     all_degiro_account_settings_models: List[DegiroAccountSettings] = []
+
     effective_config_file = resolve_config_file(config_file)
     config_manager = ConfigManager(config_file_path=str(effective_config_file))
 
@@ -321,7 +326,7 @@ def process(
         general_config_settings.experimental_importers if general_config_settings else False
     )
 
-    # --- Validation of Importer Type based on experimental flag ---
+    # Validation of Importer Type based on experimental flag
     if not experimental_importers_enabled:
         if importer_type not in [
             ImporterType.SCHWAB,
@@ -346,15 +351,26 @@ def process(
         True,
     )
 
+    try:
+        if general_config_settings:
+            print(
+                f"Loaded general configuration settings: canton={general_config_settings.canton}, full_name={general_config_settings.full_name}, language={general_config_settings.language}"
+            )
+    except Exception:
+        # Non-fatal logging/print failure shouldn't stop execution
+        pass
+
     target_broker_kind_for_config_loading = None
     if importer_type == ImporterType.FIDELITY:
         target_broker_kind_for_config_loading = "fidelity"
-    if importer_type == ImporterType.SCHWAB:
+    elif importer_type == ImporterType.SCHWAB:
         target_broker_kind_for_config_loading = "schwab"
     elif importer_type == ImporterType.IBKR:
         target_broker_kind_for_config_loading = "ibkr"
     elif importer_type == ImporterType.DEGIRO:
         target_broker_kind_for_config_loading = "degiro"
+    elif importer_type == ImporterType.TRADING212:
+        target_broker_kind_for_config_loading = "trading212"
     elif broker_name:
         target_broker_kind_for_config_loading = broker_name.lower()
         print(
@@ -391,6 +407,10 @@ def process(
                     all_ibkr_account_settings_models.append(
                         cast(IbkrAccountSettings, acc_settings.settings)
                     )
+                elif acc_settings.kind == "trading212":
+                    all_trading212_account_settings_models.append(
+                        cast(Trading212AccountSettings, acc_settings.settings)
+                    )
                 elif acc_settings.kind == "degiro":
                     all_degiro_account_settings_models.append(
                         cast(DegiroAccountSettings, acc_settings.settings)
@@ -423,6 +443,15 @@ def process(
                 logger.debug(
                     "Warning: No valid IBKR account configurations loaded for broker 'ibkr', though other configurations might exist."
                 )
+            if (
+                target_broker_kind_for_config_loading == "trading212"
+                and not all_trading212_account_settings_models
+                and concrete_accounts_list
+            ):
+                raise ValueError(
+                    "No valid Trading212 account configurations found for broker 'trading212'. "
+                    "Add a [brokers.trading212.accounts.<name>] section to config.toml."
+                )
 
             if all_fidelity_account_settings_models:
                 print(
@@ -439,6 +468,10 @@ def process(
             if all_degiro_account_settings_models:
                 print(
                     f"Successfully loaded {len(all_degiro_account_settings_models)} Degiro account(s)."
+                )
+            if all_trading212_account_settings_models:
+                print(
+                    f"Successfully loaded {len(all_trading212_account_settings_models)} Trading212 account(s)."
                 )
 
         except ValueError as e:
@@ -645,6 +678,28 @@ def process(
                 )
                 statement = degiro_importer.import_dir(str(input_file))
                 print("Degiro import complete.")
+
+            elif importer_type == ImporterType.TRADING212:
+                if not parsed_period_from or not parsed_period_to:
+                    raise typer.BadParameter(
+                        "--period-from and --period-to are required for the Trading212 importer."
+                    )
+                if not all_trading212_account_settings_models:
+                    print(
+                        "Error: No valid Trading212 account configurations loaded. "
+                        "Check config.toml for a [brokers.trading212.accounts.<name>] section."
+                    )
+                    raise typer.Exit(code=1)
+                print(
+                    f"Initializing Trading212Importer with {len(all_trading212_account_settings_models)} account configuration(s)."
+                )
+                t212_importer = Trading212Importer(
+                    period_from=parsed_period_from,
+                    period_to=parsed_period_to,
+                    account_settings_list=all_trading212_account_settings_models,
+                )
+                statement = t212_importer.import_from(str(input_file))
+                print("Trading212 import complete.")
 
             elif importer_type == ImporterType.NONE and not raw_import:
                 print(

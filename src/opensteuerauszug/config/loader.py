@@ -15,6 +15,7 @@ from .models import (
     IbkrAccountSettings,
     SchwabAccountSettings,
     FidelityAccountSettings,
+    Trading212AccountSettings,
     ConcreteAccountSettings,
     SpecificAccountSettingsUnion,
     CalculateSettings,
@@ -251,32 +252,17 @@ class ConfigManager:
         elif broker_name.lower() == "degiro":
             specific_settings = DegiroAccountSettings(**current_config)
             kind_literal = "degiro"
+        elif broker_name.lower() == "trading212":
+            specific_settings = Trading212AccountSettings(**current_config)
+            kind_literal = "trading212"
         # Example for future expansion:
         # elif broker_name.lower() == "ubs":
         #     specific_settings = UBSAccountSettings(**current_config)
         #     kind_literal = "ubs"
         else:
-            # Fallback or error if broker type is unknown/unsupported for specific models
-            # For now, we can try to use AccountSettingsBase if no specific model matches,
-            # but this might not be ideal if specific fields are expected later.
-            # A stricter approach would be to raise an error.
-            logger.warning(
-                "No specific Pydantic model defined for broker '%s'. Using AccountSettingsBase. Some broker-specific features might not be available.",
-                broker_name,
-            )
-            # This will fail if AccountSettingsBase itself is not meant to be instantiated directly
-            # or if current_config has fields not allowed by AccountSettingsBase.
-            # Given the current setup, SchwabAccountSettings is derived from AccountSettingsBase
-            # and doesn't add new fields, so this path is less likely to be hit for "schwab".
-            # If we had a distinct model, we'd use:
-            #   specific_settings = AccountSettingsBase(**current_config)
-            #   kind_literal = "base" # Or some other generic literal
-            # However, since ConcreteAccountSettings expects a kind from a Literal set,
-            # we must handle unknown brokers more gracefully or restrict them.
-            # For now, let's assume "schwab" is the only configured one.
             raise ValueError(
-                f"Unsupported broker type for specific settings: {broker_name}. "
-                "Supported brokers are 'schwab', 'ibkr', 'fidelity' and 'degiro'."
+                f"Unsupported broker type for specific settings: '{broker_name}'. "
+                "Supported brokers are 'schwab', 'ibkr', 'fidelity', 'degiro' and 'trading212'."
             )
 
         try:

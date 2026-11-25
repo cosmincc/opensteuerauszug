@@ -51,7 +51,7 @@ Below are previews from a sample Steuerauszug generated from the [VT and Chill](
 
 ## Supported Brokers
 
-For now the focus is on brokers / banks that the author has 
+For now the focus is on brokers / banks that the author has
 
 - Charles Schwab (main trading account and Equity Awards)
 - Interactive Brokers
@@ -59,6 +59,7 @@ For now the focus is on brokers / banks that the author has
 Thanks to community contributions we also support
 
 - DEGIRO (contributed by [@manuelgr0](https://github.com/manuelgr0), with multilingual support by [@dalpozz](https://github.com/dalpozz) and [@VincentBlondeau](https://github.com/VincentBlondeau))
+- Trading212 (CSV export or live API)
 
 Additionally we can recalculate and verify any existing steuerauszug (this is mostly to increase confidence in the software itself)
 
