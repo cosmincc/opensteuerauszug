@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import requests
 
-from ._models import T212Dividend, T212Order, parse_t212_date
+from ._models import T212Dividend, T212Order, normalize_currency, parse_t212_date
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +239,9 @@ class T212ApiClient:
                 filled_at_str = fill.get("filledAt") or order.get("createdAt", "")
                 filled_at = parse_t212_date(filled_at_str)
                 qty = abs(Decimal(str(fill.get("quantity") or order.get("filledQuantity", 0))))
-                price = Decimal(str(fill.get("price", 0)))
+                price_raw = Decimal(str(fill.get("price", 0)))
+                price_norm, currency = normalize_currency(price_raw, instrument.get("currency", ""))
+                price = price_norm if price_norm is not None else price_raw
                 wallet = fill.get("walletImpact") or {}
                 fx_rate_raw = wallet.get("fxRate")
                 fx_rate = Decimal(str(fx_rate_raw)) if fx_rate_raw is not None else None
@@ -256,7 +258,7 @@ class T212ApiClient:
                         isin=instrument.get("isin"),
                         quantity=qty,
                         price=price,
-                        currency=instrument.get("currency", ""),
+                        currency=currency,
                         fx_rate=fx_rate,
                         total_account_currency=net_value,
                     )
@@ -295,7 +297,13 @@ class T212ApiClient:
                 amount_raw = item.get("amount")
                 amount = Decimal(str(amount_raw)) if amount_raw is not None else Decimal("0")
                 gross_raw = item.get("grossAmountPerShare")
-                gross = Decimal(str(gross_raw)) if gross_raw is not None else None
+                qty_raw = item.get("quantity")
+                gross, instrument_currency = normalize_currency(
+                    Decimal(str(gross_raw)) if gross_raw is not None else None,
+                    item.get("tickerCurrency")
+                    or instrument.get("currency")
+                    or item.get("currency", ""),
+                )
                 result.append(
                     T212Dividend(
                         paid_on=paid_on,
@@ -305,8 +313,10 @@ class T212ApiClient:
                         amount_account_currency=amount,
                         gross_per_share=gross,
                         withholding_tax=None,  # T212 dividend endpoint doesn't expose WHT
-                        instrument_currency=item.get("tickerCurrency", item.get("currency", "")),
+                        instrument_currency=instrument_currency,
                         fx_rate=None,
+                        quantity=Decimal(str(qty_raw)) if qty_raw is not None else None,
+                        account_currency=(item.get("currency") or "").upper(),
                     )
                 )
             except (ValueError, KeyError, TypeError, ArithmeticError) as exc:

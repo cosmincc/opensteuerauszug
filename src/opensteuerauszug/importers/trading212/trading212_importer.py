@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 from opensteuerauszug.config.models import Trading212AccountSettings
 from opensteuerauszug.core.position_reconciler import PositionReconciler
@@ -31,12 +31,12 @@ from opensteuerauszug.model.ech0196 import (
 from ._converters import (
     T212_TYPE_TO_ECH,
     _CRYPTO_TYPES,
-    _dividend_to_payment,
+    _dividend_to_payments,
     _extract_instrument_info,
     _orders_to_mutation_stocks,
     _remap_tickers_via_isin,
 )
-from ._models import T212CashTransaction, T212Dividend, T212Order
+from ._models import T212CashTransaction, T212Dividend, T212Order, normalize_currency
 from ._utils import _country_from_isin, _validate_isin
 from .api_client import T212ApiClient
 from .csv_parser import T212CsvParser
@@ -74,11 +74,14 @@ class Trading212Importer:
         if not account_settings_list:
             logger.warning("Trading212Importer initialised with no account settings.")
         elif len(account_settings_list) > 1:
-            logger.warning(
-                "Multiple Trading212 account configurations provided (%d); "
-                "only the first account ('%s') will be used.",
-                len(account_settings_list),
-                account_settings_list[0].account_number,
+            # The input (CSV export or API key) belongs to exactly one account;
+            # silently picking one of several configs could attach the wrong
+            # account number, currency or cash balances to the statement.
+            raise ValueError(
+                f"{len(account_settings_list)} Trading212 accounts are configured, but the "
+                "Trading212 importer processes one account per run. Keep a single "
+                "[brokers.trading212.accounts.<name>] section in the config used for this run "
+                "(e.g. use a separate --config file per account)."
             )
 
     # ------------------------------------------------------------------
@@ -97,40 +100,70 @@ class Trading212Importer:
             A populated ``TaxStatement``.
         """
         p = Path(input_path)
+        csv_paths: List[str] = []
         if p.is_file():
-            if self._settings and self._settings.api_key:
-                logger.info("Trading212 hybrid mode (CSV + API): %s", input_path)
-                return self._import_hybrid(str(p))
-            logger.info("Trading212 CSV mode: %s", input_path)
-            return self._import_csv(str(p))
+            csv_paths = [str(p)]
         elif p.is_dir():
-            logger.info("Trading212 API mode (directory: %s)", input_path)
-            return self._import_api()
+            # A directory may hold several CSV exports (T212 limits each export
+            # to one year); they are merged and de-duplicated.
+            csv_paths = [str(c) for c in sorted(p.glob("*.csv")) if c.is_file()]
         else:
             raise ValueError(
-                f"input_path '{input_path}' must be an existing file (CSV mode) "
-                "or an existing directory (API mode)."
+                f"input_path '{input_path}' must be an existing file (CSV export), a directory "
+                "containing CSV exports, or an existing directory without CSVs (API mode)."
             )
+
+        if csv_paths:
+            source: Union[str, List[str]] = csv_paths[0] if len(csv_paths) == 1 else csv_paths
+            if self._settings and self._settings.api_key:
+                logger.info("Trading212 hybrid mode (CSV + API): %s", ", ".join(csv_paths))
+                return self._import_hybrid(source)
+            logger.info("Trading212 CSV mode: %s", ", ".join(csv_paths))
+            return self._import_csv(source)
+        logger.info("Trading212 API mode (directory without CSV files: %s)", input_path)
+        return self._import_api()
 
     # ------------------------------------------------------------------
     # CSV mode
     # ------------------------------------------------------------------
 
-    def _import_csv(self, path: str) -> TaxStatement:
+    def _import_csv(self, path: Union[str, Sequence[str]]) -> TaxStatement:
         parser = T212CsvParser(path)
         orders, dividends, cash_transactions = parser.parse()
+        _disambiguate_tickers(orders, dividends)
         return self._build_tax_statement(
             orders,
             dividends,
             current_positions=None,
             cash_transactions=cash_transactions,
+            extra_warnings=self._csv_parser_warnings(parser),
         )
+
+    def _csv_parser_warnings(self, parser: T212CsvParser) -> List[CriticalWarning]:
+        warnings: List[CriticalWarning] = []
+        if parser.unknown_actions:
+            summary = ", ".join(
+                f"'{action}' ({count}x)" for action, count in sorted(parser.unknown_actions.items())
+            )
+            warnings.append(
+                CriticalWarning(
+                    category=CriticalWarningCategory.OTHER,
+                    message=(
+                        f"The Trading212 CSV contains actions the importer does not handle: {summary}. "
+                        "These rows were ignored. If they are corporate actions (spin-off, stock "
+                        "distribution, merger, transfer) the reported positions or income may be "
+                        "incomplete; check them manually."
+                    ),
+                    source="Trading212Importer",
+                )
+            )
+        return warnings
 
     # ------------------------------------------------------------------
     # Hybrid mode (CSV transactions + API positions & instrument types)
     # ------------------------------------------------------------------
 
-    def _import_hybrid(self, csv_path: str) -> TaxStatement:
+    def _import_hybrid(self, csv_path: Union[str, Sequence[str]]) -> TaxStatement:
         """CSV for orders/dividends (with WHT + FX), API for positions + types."""
         parser = T212CsvParser(csv_path)
         orders, dividends, cash_transactions = parser.parse()
@@ -143,7 +176,7 @@ class Trading212Importer:
         )
 
         isin_to_api_ticker: Dict[str, str] = {}
-        extra_warnings: List[CriticalWarning] = []
+        extra_warnings: List[CriticalWarning] = self._csv_parser_warnings(parser)
         try:
             instrument_types, isin_to_api_ticker = client.get_instruments_extended()
         except Exception as exc:
@@ -201,8 +234,33 @@ class Trading212Importer:
 
         # Remap CSV short tickers to API qualified tickers via ISIN so that
         # position lookups in _build_tax_statement match the API ticker format.
+        # Positions and API orders also carry ISIN + API ticker; use them as a
+        # fallback bridge when the /instruments metadata could not be fetched.
+        isin_to_api_ticker = {
+            **_isin_ticker_map(current_positions, api_all_orders),
+            **isin_to_api_ticker,
+        }
         if isin_to_api_ticker:
             _remap_tickers_via_isin(orders, dividends, isin_to_api_ticker)
+        _disambiguate_tickers(orders, dividends)
+
+        # The API order history has no stock splits; merge the split rows from
+        # the CSV so that backward synthesis from today's position crosses
+        # splits correctly (for the period the CSV covers).
+        if api_all_orders is not None:
+            csv_splits = [o for o in orders if o.is_split]
+            if csv_splits:
+                api_all_orders = list(api_all_orders) + csv_splits
+        if current_positions and (
+            parser.latest_date is None or parser.latest_date < date.today() - timedelta(days=7)
+        ):
+            extra_warnings.append(
+                _corporate_action_gap_warning(
+                    f"the CSV export ends on {parser.latest_date}"
+                    if parser.latest_date
+                    else "the CSV export has no dated rows"
+                )
+            )
 
         return self._build_tax_statement(
             orders,
@@ -262,7 +320,15 @@ class Trading212Importer:
 
         orders = client.get_orders(stop_before=self.period_from)
         dividends = client.get_dividends(stop_before=self.period_from)
+        account_ccy = (summary.get("currency") or self._settings.account_currency or "").upper()
+        for d in dividends:
+            if not d.account_currency:
+                d.account_currency = account_ccy
         current_positions = client.get_current_positions()
+        if current_positions:
+            extra_warnings.append(
+                _corporate_action_gap_warning("API mode uses no CSV export at all")
+            )
         # API mode has no cash transaction history; pass empty list.
         return self._build_tax_statement(
             orders,
@@ -332,7 +398,17 @@ class Trading212Importer:
                 if ticker:
                     current_pos_by_ticker[ticker] = pos
 
+        # Securities held during the period may have no trade or dividend in the
+        # CSV/period (e.g. an accumulating ETF bought years ago).  Include every
+        # ticker known from the live positions and the full order history so
+        # their opening/closing balances are reported.
         all_tickers = set(orders_by_ticker) | set(dividends_by_ticker)
+        if current_pos_by_ticker:
+            all_tickers |= {
+                t for t, pos in current_pos_by_ticker.items() if _position_quantity(pos) != 0
+            }
+        if recon_orders_by_ticker:
+            all_tickers |= set(recon_orders_by_ticker)
         instruments_dict = instrument_types or {}
         statement_warnings: List[CriticalWarning] = list(extra_warnings or [])
         securities: List[Security] = []
@@ -363,6 +439,7 @@ class Trading212Importer:
             cash_transactions or [],
             depot_id,
         )
+        statement_warnings.extend(self._cash_balance_warnings(list_of_bank_accounts))
         statement = TaxStatement(
             minorVersion=1,
             periodFrom=self.period_from,
@@ -397,9 +474,32 @@ class Trading212Importer:
         warnings: List[CriticalWarning] = []
 
         api_type = instruments_dict.get(ticker)
-        isin, name, sec_type, instrument_currency = _extract_instrument_info(
-            ticker, ticker_orders, ticker_dividends, sec_type_override=api_type
+        recon_ticker_orders = (
+            recon_orders_by_ticker.get(ticker, []) if recon_orders_by_ticker is not None else []
         )
+        isin, name, sec_type, instrument_currency = _extract_instrument_info(
+            ticker,
+            list(ticker_orders) + list(recon_ticker_orders),
+            ticker_dividends,
+            sec_type_override=api_type,
+        )
+        position_instrument = (
+            (current_pos_by_ticker.get(ticker) or {}).get("instrument") or {}
+            if current_pos_by_ticker is not None
+            else {}
+        )
+        isin = isin or position_instrument.get("isin")
+        if name == ticker and position_instrument.get("name"):
+            name = position_instrument["name"]
+        if not instrument_currency:
+            instrument_currency = normalize_currency(
+                None, position_instrument.get("currency") or ""
+            )[1]
+        if not instrument_currency:
+            for d in ticker_dividends:
+                if d.instrument_currency:
+                    instrument_currency = d.instrument_currency
+                    break
 
         # Optionally skip crypto (catches both CRYPTO and CRYPTOCURRENCY)
         if ignore_crypto and sec_type.upper() in _CRYPTO_TYPES:
@@ -427,10 +527,8 @@ class Trading212Importer:
         # this ticker (e.g. stock only traded in the CSV period with no
         # subsequent trades recorded in the API history yet).
         recon_mutation_stocks: Optional[List[SecurityStock]] = None
-        if recon_orders_by_ticker is not None:
-            recon_ticker_orders = recon_orders_by_ticker.get(ticker, [])
-            if recon_ticker_orders:
-                recon_mutation_stocks = _orders_to_mutation_stocks(recon_ticker_orders, currency)
+        if recon_ticker_orders:
+            recon_mutation_stocks = _orders_to_mutation_stocks(recon_ticker_orders, currency)
 
         # Add boundary balances (year-start, year-end)
         all_stocks_with_boundaries = self._add_boundary_balances(
@@ -457,6 +555,35 @@ class Trading212Importer:
                     )
                 )
 
+        # CSV-only mode starts from zero shares: a dividend received while the
+        # reconstructed holding is zero means the export does not reach back to
+        # the purchase, so the reported balances are wrong.
+        if current_pos_by_ticker is None:
+            for d in ticker_dividends:
+                if not (self.period_from <= d.paid_on <= self.period_to):
+                    continue
+                held = sum(
+                    (s.quantity for s in all_mutation_stocks if s.referenceDate < d.paid_on),
+                    Decimal("0"),
+                )
+                if held <= 0:
+                    warnings.append(
+                        CriticalWarning(
+                            category=CriticalWarningCategory.OTHER,
+                            message=(
+                                f"Security {ticker} paid a dividend on {d.paid_on} but the CSV "
+                                f"history reconstructs a holding of {held} shares at that time. "
+                                f"The CSV export(s) do not cover the purchase, so the opening and "
+                                f"closing balances (wealth tax value) for {ticker} are understated. "
+                                f"Pass a directory with all yearly exports since account opening, "
+                                f"or use hybrid mode (api_key) to anchor positions."
+                            ),
+                            source="Trading212Importer",
+                            identifier=ticker,
+                        )
+                    )
+                    break
+
         # Detect synthesis failure: orders exist but no boundary balances produced.
         has_boundaries = any(not s.mutation for s in all_stocks_with_boundaries)
         if not has_boundaries and ticker_orders:
@@ -482,15 +609,20 @@ class Trading212Importer:
             if not s.mutation or (self.period_from <= s.referenceDate <= self.period_to)
         ]
 
-        if not output_stocks:
-            logger.debug("No stock entries for %s in tax period, skipping.", ticker)
-            return None, warnings
-
         payments = [
-            _dividend_to_payment(d, currency)
+            p
             for d in ticker_dividends
             if self.period_from <= d.paid_on <= self.period_to
+            for p in _dividend_to_payments(d, currency)
         ]
+
+        has_period_mutation = any(s.mutation for s in output_stocks)
+        has_nonzero_balance = any(not s.mutation and s.quantity != 0 for s in output_stocks)
+        if not output_stocks or (
+            not has_period_mutation and not has_nonzero_balance and not payments
+        ):
+            logger.debug("No holdings or activity for %s in tax period, skipping.", ticker)
+            return None, warnings
 
         sec = Security(
             positionId=position_id,
@@ -614,6 +746,47 @@ class Trading212Importer:
     # Bank account (cash) helpers
     # ------------------------------------------------------------------
 
+    def _cash_balance_warnings(
+        self, list_of_bank_accounts: Optional[ListOfBankAccounts]
+    ) -> List[CriticalWarning]:
+        """Warn when cash balances (wealth tax) are not configured.
+
+        Neither the CSV export nor the API history provides the cash balance
+        at period end, so it must come from ``cash_balances`` in the config.
+        """
+        settings = self._settings
+        configured = settings.cash_balances if settings and settings.cash_balances else {}
+        if not configured:
+            return [
+                CriticalWarning(
+                    category=CriticalWarningCategory.OTHER,
+                    message=(
+                        "No 'cash_balances' configured for the Trading212 account, so cash held "
+                        f"at {self.period_to} is not reported (wealth tax value 0). Add e.g. "
+                        "cash_balances = { CHF = 123.45 } with the per-currency balances from "
+                        "your Trading212 annual statement, or set the balances to 0 explicitly."
+                    ),
+                    source="Trading212Importer",
+                )
+            ]
+        missing = sorted(
+            ba.bankAccountCurrency
+            for ba in (list_of_bank_accounts.bankAccount if list_of_bank_accounts else [])
+            if ba.bankAccountCurrency and ba.bankAccountCurrency not in configured
+        )
+        if missing:
+            return [
+                CriticalWarning(
+                    category=CriticalWarningCategory.OTHER,
+                    message=(
+                        f"Trading212 cash in {', '.join(missing)} earned interest but has no entry "
+                        f"in 'cash_balances'; its balance at {self.period_to} is not reported."
+                    ),
+                    source="Trading212Importer",
+                )
+            ]
+        return []
+
     def _build_bank_accounts(
         self,
         cash_transactions: List[T212CashTransaction],
@@ -705,3 +878,68 @@ class Trading212Importer:
             return None
 
         return ListOfBankAccounts(bankAccount=bank_accounts)
+
+
+# ----------------------------------------------------------------------
+# Module helpers
+# ----------------------------------------------------------------------
+
+
+def _position_quantity(pos: dict) -> Decimal:
+    raw = pos.get("quantity", 0)
+    try:
+        return Decimal(str(raw)) if raw else Decimal("0")
+    except (ArithmeticError, ValueError):
+        return Decimal("0")
+
+
+def _isin_ticker_map(
+    current_positions: Optional[List[dict]], api_orders: Optional[List[T212Order]]
+) -> Dict[str, str]:
+    """ISIN → API ticker bridge built from live positions and API orders."""
+    mapping: Dict[str, str] = {}
+    for o in api_orders or []:
+        if o.isin and o.ticker:
+            mapping[o.isin] = o.ticker
+    for pos in current_positions or []:
+        instrument = pos.get("instrument") or {}
+        isin = instrument.get("isin") or pos.get("isin")
+        ticker = pos.get("ticker") or instrument.get("ticker")
+        if isin and ticker:
+            mapping[isin] = ticker
+    return mapping
+
+
+def _disambiguate_tickers(orders: List[T212Order], dividends: List[T212Dividend]) -> None:
+    """Split one short ticker that maps to several ISINs into distinct keys.
+
+    CSV exports use exchange-less short tickers, so two different securities
+    can share one (e.g. the same symbol on two exchanges).  Grouping them would
+    merge their positions; suffix the ISIN to keep them apart.
+    """
+    isins_by_ticker: Dict[str, set] = defaultdict(set)
+    for item in [*orders, *dividends]:
+        if item.isin:
+            isins_by_ticker[item.ticker].add(item.isin)
+    ambiguous = {t for t, isins in isins_by_ticker.items() if len(isins) > 1}
+    if not ambiguous:
+        return
+    logger.warning(
+        "Tickers shared by several ISINs, keeping them apart: %s", ", ".join(sorted(ambiguous))
+    )
+    for item in [*orders, *dividends]:
+        if item.ticker in ambiguous and item.isin:
+            item.ticker = f"{item.ticker}:{item.isin}"
+
+
+def _corporate_action_gap_warning(reason: str) -> CriticalWarning:
+    return CriticalWarning(
+        category=CriticalWarningCategory.OTHER,
+        message=(
+            "Trading212 balances are reconstructed backwards from today's live positions using "
+            f"the API order history, which contains no stock splits or corporate actions, and {reason}. "
+            "If any held security had a split, spin-off or transfer after the tax period, its "
+            "opening/closing quantities are wrong. Include a CSV export up to today to cover them."
+        ),
+        source="Trading212Importer",
+    )

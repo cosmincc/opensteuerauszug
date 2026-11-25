@@ -2,10 +2,18 @@
 
 import csv
 import logging
+from collections import Counter
+from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence, Union
 
-from ._models import T212CashTransaction, T212Dividend, T212Order, parse_t212_date
+from ._models import (
+    T212CashTransaction,
+    T212Dividend,
+    T212Order,
+    normalize_currency,
+    parse_t212_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,53 +61,77 @@ REQUIRED_COLUMNS = {"action", "time"}
 
 class T212CsvParser:
     """
-    Parses a Trading212 transaction history CSV export.
+    Parses one or more Trading212 transaction history CSV exports.
 
-    The CSV is expected to contain at least 'Action' and 'Time' columns.
-    Unknown actions are logged and skipped.
+    Each CSV is expected to contain at least 'Action' and 'Time' columns.
+    When several files are given (e.g. one export per year), rows are merged
+    and exact duplicates (same T212 ``ID``, or identical content for rows
+    without an ID) are dropped so overlapping export ranges are harmless.
+
+    Unknown actions are skipped and recorded in ``unknown_actions`` so the
+    importer can surface them as critical warnings.
     """
 
-    def __init__(self, csv_path: str):
-        self._path = csv_path
+    def __init__(self, csv_path: Union[str, Sequence[str]]):
+        self._paths: List[str] = [csv_path] if isinstance(csv_path, str) else list(csv_path)
+        self._path = ", ".join(self._paths)
+        self.unknown_actions: Counter[str] = Counter()
+        self.earliest_date: Optional[date] = None
+        self.latest_date: Optional[date] = None
 
     def parse(self) -> tuple[list[T212Order], list[T212Dividend], list[T212CashTransaction]]:
-        """Parse the CSV and return (orders, dividends, cash_transactions)."""
+        """Parse the CSV(s) and return (orders, dividends, cash_transactions)."""
         orders: list[T212Order] = []
         dividends: list[T212Dividend] = []
         cash_transactions: list[T212CashTransaction] = []
+        seen_rows: set = set()
 
-        with open(self._path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None:
-                raise ValueError(f"CSV file '{self._path}' appears to be empty.")
+        for path in self._paths:
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames is None:
+                    raise ValueError(f"CSV file '{path}' appears to be empty.")
 
-            col_map = _build_column_map(reader.fieldnames)
-            _validate_required_columns(col_map, self._path)
+                col_map = _build_column_map(reader.fieldnames)
+                _validate_required_columns(col_map, path)
 
-            for row_num, raw_row in enumerate(reader, start=2):
-                row = {col_map[k]: v for k, v in raw_row.items() if k in col_map}
-                action = (row.get("action") or "").strip()
-                if not action:
-                    continue
+                for row_num, raw_row in enumerate(reader, start=2):
+                    row = {col_map[k]: v for k, v in raw_row.items() if k in col_map}
+                    action = (row.get("action") or "").strip()
+                    if not action:
+                        continue
 
-                if action in BUY_ACTIONS or action in SELL_ACTIONS:
-                    order = _parse_order(action, row, row_num, self._path)
-                    if order is not None:
-                        orders.append(order)
-                elif action in SPLIT_OPEN_ACTIONS or action in SPLIT_CLOSE_ACTIONS:
-                    order = _parse_split(action, row, row_num, self._path)
-                    if order is not None:
-                        orders.append(order)
-                elif action.startswith(DIVIDEND_ACTION_PREFIX):
-                    div = _parse_dividend(row, row_num, self._path)
-                    if div is not None:
-                        dividends.append(div)
-                elif action in CASH_INCOME_ACTIONS:
-                    tx = _parse_cash_transaction(action, row, row_num, self._path)
-                    if tx is not None:
-                        cash_transactions.append(tx)
-                elif action not in IGNORED_ACTIONS:
-                    logger.debug("CSV row %d: unknown action '%s', skipping", row_num, action)
+                    dedup_key = _row_dedup_key(raw_row)
+                    if dedup_key in seen_rows:
+                        logger.debug("CSV row %d (%s): duplicate row, skipping", row_num, path)
+                        continue
+                    seen_rows.add(dedup_key)
+                    self._track_date(row.get("time"))
+
+                    if action in BUY_ACTIONS or action in SELL_ACTIONS:
+                        order = _parse_order(action, row, row_num, path)
+                        if order is not None:
+                            orders.append(order)
+                    elif action in SPLIT_OPEN_ACTIONS or action in SPLIT_CLOSE_ACTIONS:
+                        order = _parse_split(action, row, row_num, path)
+                        if order is not None:
+                            orders.append(order)
+                    elif action.startswith(DIVIDEND_ACTION_PREFIX):
+                        div = _parse_dividend(action, row, row_num, path)
+                        if div is not None:
+                            dividends.append(div)
+                    elif action in CASH_INCOME_ACTIONS:
+                        tx = _parse_cash_transaction(action, row, row_num, path)
+                        if tx is not None:
+                            cash_transactions.append(tx)
+                    elif action not in IGNORED_ACTIONS:
+                        logger.warning(
+                            "CSV row %d (%s): unsupported action '%s', skipping",
+                            row_num,
+                            path,
+                            action,
+                        )
+                        self.unknown_actions[action] += 1
 
         logger.info(
             "Parsed T212 CSV '%s': %d orders, %d dividends, %d cash transactions",
@@ -109,6 +141,24 @@ class T212CsvParser:
             len(cash_transactions),
         )
         return orders, dividends, cash_transactions
+
+    def _track_date(self, value: Optional[str]) -> None:
+        try:
+            d = parse_t212_date(value or "")
+        except ValueError:
+            return
+        if self.earliest_date is None or d < self.earliest_date:
+            self.earliest_date = d
+        if self.latest_date is None or d > self.latest_date:
+            self.latest_date = d
+
+
+def _row_dedup_key(raw_row: dict) -> tuple:
+    """Key identifying a CSV row across (possibly overlapping) exports."""
+    row_id = (raw_row.get("ID") or "").strip()
+    if row_id:
+        return ("id", (raw_row.get("Action") or "").strip(), row_id)
+    return ("row",) + tuple(sorted((k, (v or "").strip()) for k, v in raw_row.items() if k))
 
 
 def _build_column_map(fieldnames: Sequence[str]) -> dict[str, str]:
@@ -156,6 +206,8 @@ def _parse_order(action: str, row: dict, row_num: int, path: str) -> Optional[T2
             return None
         total_raw = _parse_decimal(row.get("total"))
         total = total_raw if total_raw is not None else Decimal("0")
+        price_norm, currency = normalize_currency(price, row.get("price_currency") or "")
+        price = price_norm if price_norm is not None else price
         return T212Order(
             filled_at=filled_at,
             side=side,
@@ -164,7 +216,7 @@ def _parse_order(action: str, row: dict, row_num: int, path: str) -> Optional[T2
             isin=(row.get("isin") or "").strip() or None,
             quantity=qty,
             price=price,
-            currency=(row.get("price_currency") or "").strip(),
+            currency=currency,
             fx_rate=_parse_decimal(row.get("fx_rate")),
             total_account_currency=total,
         )
@@ -175,7 +227,17 @@ def _parse_order(action: str, row: dict, row_num: int, path: str) -> Optional[T2
         return None
 
 
-def _parse_dividend(row: dict, row_num: int, path: str) -> Optional[T212Dividend]:
+def _parse_dividend(action: str, row: dict, row_num: int, path: str) -> Optional[T212Dividend]:
+    """Parse a dividend row.
+
+    T212 semantics (verified against real exports):
+      * ``No. of shares``      – shares entitled to the dividend
+      * ``Price / share``      – *gross* dividend per share, in
+        ``Currency (Price / share)`` (the instrument currency)
+      * ``Withholding tax``    – tax withheld, in ``Currency (Withholding tax)``
+      * ``Total``              – *net* amount credited, in ``Currency (Total)``
+        (the account currency)
+    """
     ticker = (row.get("ticker") or "").strip()
     if not ticker:
         logger.warning("CSV row %d (%s): missing ticker for dividend, skipping", row_num, path)
@@ -184,18 +246,30 @@ def _parse_dividend(row: dict, row_num: int, path: str) -> Optional[T212Dividend
         paid_on = parse_t212_date(row.get("time", ""))
         amount_raw = _parse_decimal(row.get("total"))
         amount = amount_raw if amount_raw is not None else Decimal("0")
+        price_ccy_raw = (row.get("price_currency") or "").strip()
+        gross_per_share, instrument_currency = normalize_currency(
+            _parse_decimal(row.get("price")), price_ccy_raw
+        )
+        wht_raw = _parse_decimal(row.get("withholding_tax"))
+        wht_ccy_raw = (row.get("withholding_tax_currency") or "").strip() or price_ccy_raw
+        wht, wht_currency = normalize_currency(
+            abs(wht_raw) if wht_raw is not None else None, wht_ccy_raw
+        )
+        account_currency = (row.get("total_currency") or "").strip().upper()
         return T212Dividend(
             paid_on=paid_on,
             ticker=ticker,
             name=(row.get("name") or ticker).strip(),
             isin=(row.get("isin") or "").strip() or None,
             amount_account_currency=amount,
-            gross_per_share=_parse_decimal(row.get("price")),  # "Price / share" = gross per share
-            withholding_tax=_parse_decimal(row.get("withholding_tax")),
-            instrument_currency=(
-                row.get("price_currency") or row.get("total_currency") or ""
-            ).strip(),
+            gross_per_share=gross_per_share,
+            withholding_tax=wht if wht else None,
+            instrument_currency=instrument_currency or account_currency,
             fx_rate=_parse_decimal(row.get("fx_rate")),
+            quantity=_parse_decimal(row.get("quantity")),
+            account_currency=account_currency,
+            withholding_currency=wht_currency or instrument_currency,
+            action=action,
         )
     except (ValueError, KeyError, TypeError, InvalidOperation) as exc:
         logger.warning(
@@ -230,9 +304,10 @@ def _parse_split(action: str, row: dict, row_num: int, path: str) -> Optional[T2
             isin=(row.get("isin") or "").strip() or None,
             quantity=qty,
             price=Decimal("0"),  # No meaningful unit price for a split
-            currency=(row.get("price_currency") or "").strip(),
+            currency=normalize_currency(None, row.get("price_currency") or "")[1],
             fx_rate=None,
             total_account_currency=Decimal("0"),
+            is_split=True,
         )
     except (ValueError, KeyError, TypeError, InvalidOperation) as exc:
         logger.warning(

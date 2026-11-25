@@ -1,6 +1,7 @@
 """Tests for CriticalWarning generation in the Trading212 importer."""
 
 from datetime import date
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 
@@ -38,13 +39,23 @@ class TestNegativeBalanceWarning:
 
     def test_normal_buy_emits_no_warnings(self):
         """A simple BUY in CSV mode produces no CriticalWarnings."""
-        importer = _make_importer()
+        importer = _make_importer(cash_balances={"EUR": Decimal("0")})
         buy = make_order(side="BUY", filled_at=date(2024, 3, 1))
         stmt = importer._build_tax_statement([buy], [], current_positions=None)
 
         assert (
             not stmt.critical_warnings
         ), f"Expected no warnings for a normal BUY, got: {stmt.critical_warnings}"
+
+    def test_missing_cash_balances_warns(self):
+        """Without cash_balances the cash wealth is unknown and must be flagged."""
+        importer = Trading212Importer(
+            period_from=date(2024, 1, 1),
+            period_to=date(2024, 12, 31),
+            account_settings_list=[make_settings()],
+        )
+        stmt = importer._build_tax_statement([], [], current_positions=None)
+        assert any("cash_balances" in w.message for w in stmt.critical_warnings)
 
 
 class TestExtraWarningsPassthrough:

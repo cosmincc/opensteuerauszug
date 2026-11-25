@@ -103,6 +103,17 @@ opensteuerauszug --importer trading212 --period-from 2025-01-01 --period-to 2025
 
 (Ensure `api_key` is **not** set in `config.toml`, otherwise the importer will use hybrid mode.)
 
+Trading212 limits each export to one year. To cover your full history, put all yearly exports
+in one directory and pass the directory instead of a file. All `*.csv` files in it are merged;
+rows repeated in overlapping exports (same T212 `ID`, or identical content) are counted once:
+
+```console
+opensteuerauszug --importer trading212 --period-from 2025-01-01 --period-to 2025-12-31 exports/
+```
+
+If a dividend is paid on a security whose purchase is not in the exports, the importer raises a
+critical warning, because the reported balances for that security would be too low.
+
 ### What the CSV provides
 
 | Field | Available? |
@@ -110,8 +121,8 @@ opensteuerauszug --importer trading212 --period-from 2025-01-01 --period-to 2025
 | Buy / sell transactions | Yes |
 | Dividend payments | Yes |
 | Gross dividend per share | Yes (`Price / share` column) |
-| Withholding tax | Yes (`Withholding tax` column) |
-| FX rate (instrument → account currency) | Yes (`Exchange rate` column) |
+| Withholding tax | Yes (`Withholding tax` column, in its own currency) |
+| FX rate (instrument → account currency) | Parsed, but not used: the statement uses Kursliste / official CHF rates |
 | Interest on cash | Yes — aggregated per currency |
 | Share lending income | Yes — aggregated per currency |
 | Current live position | No — opening balance inferred from transaction history |
@@ -123,7 +134,7 @@ opensteuerauszug --importer trading212 --period-from 2025-01-01 --period-to 2025
 
 API mode fetches everything directly from the Trading212 REST API. Use it only when a CSV export is not available, as the API does not expose withholding-tax data or FX rates for dividends.
 
-Pass **any existing directory** as the input path — the directory itself is not read, it is only the signal to use API mode:
+Pass **any existing directory that contains no `.csv` files** as the input path — the directory itself is not read, it is only the signal to use API mode (a directory with CSV exports selects CSV or hybrid mode):
 
 ```console
 opensteuerauszug --importer trading212 --period-from 2024-01-01 --period-to 2024-12-31 .
@@ -207,7 +218,19 @@ The T212 API does not expose interest-on-cash or share-lending-income history. T
 
 ### Single account per run
 
-If you have multiple Trading212 accounts configured, only the first one is used. Run the tool separately for each account.
+The importer processes one account per run and refuses to start when several Trading212 accounts are configured. Use a separate config file (`--config`) per account.
+
+### Stock splits and corporate actions in API / hybrid mode
+
+Balances are reconstructed backwards from today's live position. The API order history contains no stock splits, spin-offs or transfers. In hybrid mode, split rows from the CSV are merged in, so pass CSV exports that reach up to today. Otherwise the importer raises a critical warning, and you should check every security that had a split after the tax period.
+
+### How dividends are reported
+
+Each dividend becomes a gross payment (`No. of shares × Price / share`) in the instrument currency, plus a separate withholding-tax payment in the currency T212 reports it in. This is the same convention as the other importers, and the payment reconciliation relies on it. Prices quoted in pence (`GBX`) are converted to `GBP`.
+
+### Cash balances
+
+Neither the CSV nor the API provides the cash balance at the end of the period. Without `cash_balances` the importer raises a critical warning and reports no cash wealth.
 
 ### `ignore_crypto` in CSV-only mode
 
@@ -220,7 +243,7 @@ T212 CSV exports do not include an instrument-type column. In CSV-only mode all 
 **`ValueError: Trading212 API mode requires an 'api_key'`**
 You passed a directory path but did not set `api_key` in `config.toml`. Either add your API key (and use hybrid or API mode) or pass a CSV file instead.
 
-**`ValueError: input_path '...' must be an existing file (CSV mode) or an existing directory (API mode)`**
+**`ValueError: input_path '...' must be an existing file (CSV export), a directory containing CSV exports, or an existing directory without CSVs (API mode)`**
 The path you provided does not exist. For CSV/hybrid mode, check the path to your exported file. For API mode, pass any existing directory (e.g. `.`).
 
 **Opening balance is 0 / incorrect**

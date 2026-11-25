@@ -310,10 +310,16 @@ class TestHybridMode:
             stmt = importer._import_hybrid(str(csv_file))
 
         sec = stmt.listOfSecurities.depot[0].security[0]
-        assert len(sec.payment) == 1
-        pmt = sec.payment[0]
-        assert pmt.withHoldingTaxClaim == Decimal("0.38")
-        assert pmt.exchangeRate == Decimal("0.92")
+        assert len(sec.payment) == 2
+        dividend, wht = sec.payment
+        # Gross = 10 shares x 0.25 USD, in the instrument currency
+        assert dividend.amount == Decimal("2.50")
+        assert dividend.amountCurrency == "USD"
+        assert dividend.exchangeRate is None
+        # Withholding kept in its own (EUR) currency, not as a CHF claim
+        assert wht.amountCurrency == "EUR"
+        assert wht.nonRecoverableTaxAmountOriginal == Decimal("0.38")
+        assert wht.withHoldingTaxClaim is None
 
     def test_hybrid_uses_api_instrument_types(self, tmp_path):
         """Hybrid mode maps instrument types from the API, not defaulting to STOCK."""
@@ -676,8 +682,8 @@ class TestTickerRemapping:
         # Only one security should exist (orders + dividends grouped under INTC_US_EQ)
         assert len(stmt.listOfSecurities.depot[0].security) == 1
         sec = stmt.listOfSecurities.depot[0].security[0]
-        assert len(sec.payment) == 1
-        assert sec.payment[0].withHoldingTaxClaim == Decimal("0.38")
+        assert len(sec.payment) == 2
+        assert sec.payment[1].nonRecoverableTaxAmountOriginal == Decimal("0.38")
 
 
 # ---------------------------------------------------------------------------

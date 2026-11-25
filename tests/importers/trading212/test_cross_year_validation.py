@@ -32,13 +32,13 @@ from typing import Dict, List, Tuple
 
 import pytest
 
-logger = logging.getLogger(__name__)
-
 from opensteuerauszug.importers.trading212.csv_parser import T212CsvParser
 from opensteuerauszug.importers.trading212.trading212_importer import Trading212Importer
 from opensteuerauszug.model.ech0196 import TaxStatement
 
 from .conftest import make_settings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # File discovery (resolved at import/collection time)
@@ -281,8 +281,8 @@ class TestCrossYearBalanceConsistency:
                                     )
 
         assert not synthesis_bugs, (
-            f"Synthesis bug(s) detected — negative balance despite non-negative "
-            f"net mutations in the CSV exports:\n" + "\n".join(synthesis_bugs)
+            "Synthesis bug(s) detected — negative balance despite non-negative "
+            "net mutations in the CSV exports:\n" + "\n".join(synthesis_bugs)
         )
 
         if data_gaps:

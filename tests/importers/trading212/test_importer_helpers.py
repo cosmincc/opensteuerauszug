@@ -11,7 +11,7 @@ import pytest
 from opensteuerauszug.importers.trading212._models import parse_t212_date
 from opensteuerauszug.importers.trading212._converters import (
     T212_TYPE_TO_ECH,
-    _dividend_to_payment,
+    _dividend_to_payments,
     _extract_instrument_info,
     _orders_to_mutation_stocks,
 )
@@ -75,7 +75,8 @@ class TestOrderToMutationStocks:
         assert s.referenceDate == date(2024, 6, 1)
         assert s.quotationType == "PIECE"
         assert s.unitPrice == Decimal("100.00")
-        assert s.exchangeRate == Decimal("0.90")
+        # T212's rate is relative to the account currency, not CHF: not copied.
+        assert s.exchangeRate is None
 
 
 # ---------------------------------------------------------------------------
@@ -84,22 +85,43 @@ class TestOrderToMutationStocks:
 
 
 class TestDividendToPayment:
-    def test_dividend_maps_to_payment(self):
-        div = make_dividend(amount="12.50", paid_on=date(2024, 5, 16))
-        payment = _dividend_to_payment(div, "EUR")
-        assert payment.paymentDate == date(2024, 5, 16)
-        assert payment.amount == Decimal("12.50")
+    def test_gross_amount_in_instrument_currency(self):
+        """amount = shares x gross per share, in the instrument currency (not net Total)."""
+        div = make_dividend(
+            amount="4.10", quantity="20", gross_per_share="0.25", paid_on=date(2024, 5, 16)
+        )
+        payments = _dividend_to_payments(div, "EUR")
+        assert len(payments) == 1
+        p = payments[0]
+        assert p.paymentDate == date(2024, 5, 16)
+        assert p.amount == Decimal("5.00")
+        assert p.amountCurrency == "USD"
+        assert p.quantity == Decimal("20")
+        assert p.amountPerUnit == Decimal("0.25")
+        assert p.withHoldingTaxClaim is None
+        assert p.exchangeRate is None
 
-    def test_payment_currency_from_instrument(self):
-        div = make_dividend(instrument_currency="USD")
-        payment = _dividend_to_payment(div, "EUR")
-        assert payment.amountCurrency == "USD"
+    def test_withholding_is_separate_payment_in_its_currency(self):
+        div = make_dividend(withholding_tax="0.75", withholding_currency="USD")
+        dividend, wht = _dividend_to_payments(div, "EUR")
+        assert dividend.amount == Decimal("5.00")
+        assert dividend.nonRecoverableTaxAmountOriginal is None
+        assert wht.amount == Decimal("-0.75")
+        assert wht.amountCurrency == "USD"
+        assert wht.nonRecoverableTaxAmountOriginal == Decimal("0.75")
+        # Must not be booked as a CHF withholding claim
+        assert wht.withHoldingTaxClaim is None
 
-    def test_gross_per_share_mapped_to_amount_per_unit(self):
-        div = make_dividend()
-        div.gross_per_share = Decimal("0.25")
-        payment = _dividend_to_payment(div, "EUR")
-        assert payment.amountPerUnit == Decimal("0.25")
+    def test_chf_withholding_becomes_claim(self):
+        div = make_dividend(instrument_currency="CHF", withholding_tax="1.75")
+        _, wht = _dividend_to_payments(div, "CHF")
+        assert wht.withHoldingTaxClaim == Decimal("1.75")
+
+    def test_fallback_to_net_amount_in_account_currency(self):
+        div = make_dividend(amount="4.10", quantity=None, account_currency="EUR")
+        (p,) = _dividend_to_payments(div, "USD")
+        assert p.amount == Decimal("4.10")
+        assert p.amountCurrency == "EUR"
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +337,8 @@ class TestMultiTickerStatement:
         assert sec.symbol == "AAPL_US_EQ"
         assert len(sec.payment) == 1
         assert sec.payment[0].amount == Decimal("5.00")
+        # CSV mode cannot see the purchase: must be flagged
+        assert any("do not cover the purchase" in w.message for w in stmt.critical_warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +367,7 @@ class TestConverterFallbacks:
         """When div.instrument_currency is None, the fallback currency should be used."""
         div = make_dividend()
         div.instrument_currency = None
-        payment = _dividend_to_payment(div, "CHF")
+        payment = _dividend_to_payments(div, "CHF")[0]
         assert payment.amountCurrency == "CHF"
 
     def test_extract_info_resolves_isin_from_dividends(self):
@@ -440,13 +464,13 @@ class TestImporterInit:
         )
         assert importer._settings is None
 
-    def test_multiple_accounts_uses_first(self):
-        """Multiple accounts should use the first one only."""
+    def test_multiple_accounts_rejected(self):
+        """Several configured accounts are ambiguous for a single input and must error."""
         settings_a = make_settings(account_number="A")
         settings_b = make_settings(account_number="B")
-        importer = Trading212Importer(
-            period_from=date(2024, 1, 1),
-            period_to=date(2024, 12, 31),
-            account_settings_list=[settings_a, settings_b],
-        )
-        assert importer._settings.account_number == "A"
+        with pytest.raises(ValueError, match="one account per run"):
+            Trading212Importer(
+                period_from=date(2024, 1, 1),
+                period_to=date(2024, 12, 31),
+                account_settings_list=[settings_a, settings_b],
+            )

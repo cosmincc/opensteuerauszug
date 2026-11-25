@@ -351,15 +351,6 @@ def process(
         True,
     )
 
-    try:
-        if general_config_settings:
-            print(
-                f"Loaded general configuration settings: canton={general_config_settings.canton}, full_name={general_config_settings.full_name}, language={general_config_settings.language}"
-            )
-    except Exception:
-        # Non-fatal logging/print failure shouldn't stop execution
-        pass
-
     target_broker_kind_for_config_loading = None
     if importer_type == ImporterType.FIDELITY:
         target_broker_kind_for_config_loading = "fidelity"

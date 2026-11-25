@@ -94,6 +94,10 @@ def make_dividend(
     instrument_currency="USD",
     withholding_tax=None,
     fx_rate="0.92",
+    quantity="20",
+    gross_per_share="0.25",
+    account_currency="EUR",
+    withholding_currency=None,
 ) -> T212Dividend:
     return T212Dividend(
         paid_on=paid_on,
@@ -101,8 +105,11 @@ def make_dividend(
         name="Apple Inc",
         isin=isin,
         amount_account_currency=Decimal(amount),
-        gross_per_share=Decimal("0.25"),
+        gross_per_share=Decimal(gross_per_share) if gross_per_share is not None else None,
         withholding_tax=Decimal(withholding_tax) if withholding_tax is not None else None,
         instrument_currency=instrument_currency,
         fx_rate=Decimal(fx_rate) if fx_rate is not None else None,
+        quantity=Decimal(quantity) if quantity is not None else None,
+        account_currency=account_currency,
+        withholding_currency=withholding_currency or instrument_currency,
     )

@@ -1,9 +1,9 @@
 """T212-to-eCH-0196 converters for the Trading212 importer."""
 
 import logging
-from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
+from opensteuerauszug.importers.common.payments import build_security_payment
 from opensteuerauszug.model.ech0196 import (
     SecurityCategory,
     SecurityPayment,
@@ -48,25 +48,64 @@ def _orders_to_mutation_stocks(orders: List[T212Order], currency: str) -> List[S
                 balanceCurrency=order.currency or currency,
                 name=f"{order.side} {order.ticker}",
                 unitPrice=order.price if order.price else None,
-                exchangeRate=order.fx_rate,
+                # T212's "Exchange rate" is relative to the account currency,
+                # not CHF; leave exchangeRate for the calculators to fill.
             )
         )
     return stocks
 
 
-def _dividend_to_payment(div: T212Dividend, currency: str) -> SecurityPayment:
-    """Convert a T212Dividend to a SecurityPayment."""
-    return SecurityPayment(
-        paymentDate=div.paid_on,
-        quotationType="PIECE",
-        quantity=Decimal("0"),  # Not reported by T212; set to 0
-        amountCurrency=div.instrument_currency or currency,
-        amount=div.amount_account_currency,
-        amountPerUnit=div.gross_per_share,
-        exchangeRate=div.fx_rate,
-        withHoldingTaxClaim=div.withholding_tax,
-        name=f"Dividend {div.ticker}",
+def _dividend_to_payments(div: T212Dividend, currency: str) -> List[SecurityPayment]:
+    """Convert a T212Dividend to broker SecurityPayment entries.
+
+    Follows the convention shared by the other importers (see
+    ``importers.common.payments``): one payment carrying the *gross* dividend
+    in the instrument currency, and a separate payment for the withholding
+    tax.  The payment reconciliation calculator relies on this split.
+
+    When the gross amount cannot be derived (no share count or per-share
+    amount), the net amount credited in the account currency is used instead.
+    """
+    label = div.action or "Dividend"
+    description = f"Dividend {div.ticker}"
+    if div.quantity is not None and div.gross_per_share is not None:
+        amount = div.quantity * div.gross_per_share
+        amount_currency = div.instrument_currency or currency
+    else:
+        logger.warning(
+            "Dividend %s on %s: no share count / gross per share; using net amount "
+            "credited in account currency.",
+            div.ticker,
+            div.paid_on,
+        )
+        amount = div.amount_account_currency
+        amount_currency = div.account_currency or div.instrument_currency or currency
+
+    payment = build_security_payment(
+        payment_date=div.paid_on,
+        description=description,
+        currency=amount_currency,
+        amount=amount,
+        broker_label=label,
     )
+    if div.quantity is not None:
+        payment.quantity = div.quantity
+    if div.gross_per_share is not None and amount_currency == (div.instrument_currency or currency):
+        payment.amountPerUnit = div.gross_per_share
+    payments = [payment]
+
+    if div.withholding_tax:
+        payments.append(
+            build_security_payment(
+                payment_date=div.paid_on,
+                description=description,
+                currency=div.withholding_currency or amount_currency,
+                amount=-abs(div.withholding_tax),
+                broker_label="Withholding tax",
+                is_withholding=True,
+            )
+        )
+    return payments
 
 
 def _extract_instrument_info(
