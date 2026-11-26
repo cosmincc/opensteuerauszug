@@ -1024,8 +1024,8 @@ def test_open_position_balance_date_is_day_after_period_end(sample_ibkr_settings
             os.remove(xml_file_path)
 
 
-def test_cash_transaction_security_interest_assert(sample_ibkr_settings):
-    """CashTransaction with security ID and interest type should raise AssertionError."""
+def test_interest_linked_to_non_bond_security_is_rejected(sample_ibkr_settings):
+    """CashTransaction with security ID and interest type should raise ValueError."""
     period_from = date(2023, 1, 1)
     period_to = date(2023, 12, 31)
 
@@ -1040,7 +1040,7 @@ def test_cash_transaction_security_interest_assert(sample_ibkr_settings):
         xml_file_path = tmp_file.name
 
     try:
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="interest can only be linked to bonds"):
             importer.import_files([xml_file_path])
     finally:
         if os.path.exists(xml_file_path):

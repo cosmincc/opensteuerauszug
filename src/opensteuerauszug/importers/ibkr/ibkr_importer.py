@@ -911,9 +911,17 @@ class IbkrImporter:
                         tx_type_str = tx_type.value
                         tx_type_str_lower = str(tx_type_str).lower()
                         asset_category = getattr(cash_tx, 'assetCategory', None)
-                        # We assert that we do not book general broker/cash interest accidentally under a security.
+                        # Do not book general broker/cash interest accidentally under a security.
                         # However, bond interest is fine at import time (assetCategory == "BOND").
-                        assert 'interest' not in tx_type_str_lower or asset_category == 'BOND'
+                        # Use an explicit error, not assert, so the check also runs under
+                        # "python -O" and the user gets an actionable message.
+                        if 'interest' in tx_type_str_lower and asset_category != 'BOND':
+                            raise ValueError(
+                                f"CashTransaction '{description}' of type {tx_type_str} is "
+                                f"linked to security conid={security_id} with asset category "
+                                f"{asset_category}, but interest can only be linked to bonds. "
+                                "Please report this with the affected Flex rows."
+                            )
 
                         sec_pos_key = self._find_processed_security_position(
                             processed_security_positions,
