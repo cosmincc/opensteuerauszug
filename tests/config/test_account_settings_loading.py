@@ -1,9 +1,11 @@
 """Tests for resolving broker account sections from config.toml."""
 
+from decimal import Decimal
+
 import pytest
 
 from opensteuerauszug.config.loader import ConfigManager
-from opensteuerauszug.config.models import DegiroAccountSettings
+from opensteuerauszug.config.models import DegiroAccountSettings, RevolutAccountSettings
 
 CONFIG_TEMPLATE = """
 [general]
@@ -49,3 +51,25 @@ def test_unknown_broker_reports_the_supported_brokers(tmp_path):
 
     with pytest.raises(ValueError, match="degiro"):
         manager.get_account_settings("unsupported", "main")
+
+
+def test_revolut_account_section_resolves_with_isin_map_and_withholding_rates(tmp_path):
+    """Revolut-specific keys from [brokers.revolut.accounts.*] reach the settings model."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        CONFIG_TEMPLATE.format(broker="revolut")
+        + 'isin_map = { AAPL = "US0378331005" }\n'
+        + "dividend_withholding_rates = { US = 0.15, TSM = 0.21 }\n",
+        encoding="utf-8",
+    )
+
+    settings = ConfigManager(str(config_path)).get_account_settings("revolut", "main")
+
+    assert settings.kind == "revolut"
+    assert isinstance(settings.settings, RevolutAccountSettings)
+    assert settings.settings.isin_map == {"AAPL": "US0378331005"}
+    assert settings.settings.dividend_withholding_rates == {
+        "US": Decimal("0.15"),
+        "TSM": Decimal("0.21"),
+    }
+    assert settings.settings.include_cash is True

@@ -60,6 +60,10 @@ Thanks to community contributions we also support
 
 - DEGIRO (contributed by [@manuelgr0](https://github.com/manuelgr0), with multilingual support by [@dalpozz](https://github.com/dalpozz) and [@VincentBlondeau](https://github.com/VincentBlondeau))
 
+Experimental (enable `experimental_importers` in the config):
+
+- Revolut Invest ([guide](docs/importer_revolut.md))
+
 Additionally we can recalculate and verify any existing steuerauszug (this is mostly to increase confidence in the software itself)
 
 ## Related work and alternatives

@@ -32,6 +32,15 @@ full_name = "Test User - Secondary Schwab" # Example of overriding a general set
 # [brokers.schwab.accounts.default_schwab_account.processing_flags]
 # detect_foreign_income = false # Override for this specific account
 
+# Revolut Invest (experimental: needs experimental_importers = true above).
+# See docs/importer_revolut.md.
+# [brokers.revolut.accounts.main]
+# account_number = "REVOLUT"          # Any identifier; used as depot / account number
+# isin_map = { AAPL = "US0378331005" } # Revolut exports tickers only
+# dividend_withholding_rates = { US = 0.15 } # Rate by ticker or issuer country
+# include_cash = true
+# bank_country = "LT"                 # Revolut Securities Europe UAB
+
 # Example of another broker (not used by current Schwab importer logic but shows structure)
 # [brokers.another_bank]
 # language = "fr"

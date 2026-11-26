@@ -110,6 +110,34 @@ class DegiroAccountSettings(AccountSettingsBase):
     pass
 
 
+class RevolutAccountSettings(AccountSettingsBase):
+    '''Specific configuration settings for a Revolut Invest account.'''
+
+    isin_map: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Ticker -> ISIN mapping. Revolut exports only tickers; an ISIN lets the "
+            "Kursliste identify the security and gives the issuer country."
+        ),
+    )
+    dividend_withholding_rates: Dict[str, Decimal] = Field(
+        default_factory=dict,
+        description=(
+            "Withholding tax rate (e.g. 0.15) used to gross up Revolut's net dividends, "
+            "keyed by ticker or by two-letter issuer country. Overrides the built-in "
+            "default of 0.15 for US issuers."
+        ),
+    )
+    include_cash: bool = Field(
+        default=True,
+        description="If True, report the cash balance reconstructed from the export.",
+    )
+    bank_country: str = Field(
+        default="LT",
+        description="Country of the account's custodian (Revolut Securities Europe UAB: LT).",
+    )
+
+
 class CalculateSettings(BaseModel):
     """Settings for the calculation process."""
 
@@ -127,7 +155,11 @@ class CalculateSettings(BaseModel):
 
 # A type union for all possible specific account settings models
 SpecificAccountSettingsUnion = Union[
-    SchwabAccountSettings, IbkrAccountSettings, FidelityAccountSettings, DegiroAccountSettings
+    SchwabAccountSettings,
+    IbkrAccountSettings,
+    FidelityAccountSettings,
+    DegiroAccountSettings,
+    RevolutAccountSettings,
 ]
 
 
@@ -139,7 +171,7 @@ class ConcreteAccountSettings(BaseModel):
     or other specific types in the future.
     '''
 
-    kind: Literal["schwab", "ibkr", "fidelity", "degiro"]
+    kind: Literal["schwab", "ibkr", "fidelity", "degiro", "revolut"]
     settings: SpecificAccountSettingsUnion
 
     # Delegate attribute access to the underlying specific settings model

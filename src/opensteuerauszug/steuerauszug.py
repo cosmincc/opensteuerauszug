@@ -12,6 +12,7 @@ from .config.models import (
     IbkrAccountSettings,
     FidelityAccountSettings,
     DegiroAccountSettings,
+    RevolutAccountSettings,
 )
 from .render.translations import DEFAULT_LANGUAGE
 from .core.identifier_loader import SecurityIdentifierMapLoader
@@ -67,6 +68,7 @@ class ImporterType(str, Enum):
     IBKR = "ibkr"
     FIDELITY = "fidelity"
     DEGIRO = "degiro"
+    REVOLUT = "revolut"
     NONE = "none"
 
 
@@ -312,6 +314,7 @@ def process(
     all_schwab_account_settings_models: List[SchwabAccountSettings] = []
     all_ibkr_account_settings_models: List[IbkrAccountSettings] = []
     all_degiro_account_settings_models: List[DegiroAccountSettings] = []
+    all_revolut_account_settings_models: List[RevolutAccountSettings] = []
     effective_config_file = resolve_config_file(config_file)
     config_manager = ConfigManager(config_file_path=str(effective_config_file))
 
@@ -355,6 +358,8 @@ def process(
         target_broker_kind_for_config_loading = "ibkr"
     elif importer_type == ImporterType.DEGIRO:
         target_broker_kind_for_config_loading = "degiro"
+    elif importer_type == ImporterType.REVOLUT:
+        target_broker_kind_for_config_loading = "revolut"
     elif broker_name:
         target_broker_kind_for_config_loading = broker_name.lower()
         print(
@@ -394,6 +399,10 @@ def process(
                 elif acc_settings.kind == "degiro":
                     all_degiro_account_settings_models.append(
                         cast(DegiroAccountSettings, acc_settings.settings)
+                    )
+                elif acc_settings.kind == "revolut":
+                    all_revolut_account_settings_models.append(
+                        cast(RevolutAccountSettings, acc_settings.settings)
                     )
                 else:
                     print(
@@ -439,6 +448,10 @@ def process(
             if all_degiro_account_settings_models:
                 print(
                     f"Successfully loaded {len(all_degiro_account_settings_models)} Degiro account(s)."
+                )
+            if all_revolut_account_settings_models:
+                print(
+                    f"Successfully loaded {len(all_revolut_account_settings_models)} Revolut account(s)."
                 )
 
         except ValueError as e:
@@ -645,6 +658,28 @@ def process(
                 )
                 statement = degiro_importer.import_dir(str(input_file))
                 print("Degiro import complete.")
+
+            elif importer_type == ImporterType.REVOLUT:
+                if not parsed_period_from or not parsed_period_to:
+                    raise typer.BadParameter(
+                        "--period-from and --period-to are required for the Revolut importer."
+                    )
+                if not input_file.exists():
+                    raise typer.BadParameter(
+                        f"Input for Revolut importer must be a CSV file or a directory, but got: {input_file}"
+                    )
+                print(
+                    f"Initializing RevolutImporter with {len(all_revolut_account_settings_models)} Revolut account configuration(s)."
+                )
+                from .importers.revolut.revolut_importer import RevolutImporter
+
+                revolut_importer = RevolutImporter(
+                    period_from=parsed_period_from,
+                    period_to=parsed_period_to,
+                    account_settings_list=all_revolut_account_settings_models,
+                )
+                statement = revolut_importer.import_path(str(input_file))
+                print("Revolut import complete.")
 
             elif importer_type == ImporterType.NONE and not raw_import:
                 print(

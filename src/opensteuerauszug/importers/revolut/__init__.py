@@ -1,0 +1,1 @@
+"""Revolut Invest importer."""
