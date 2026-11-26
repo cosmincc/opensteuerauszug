@@ -3124,3 +3124,62 @@ def test_bond_interest_import_succeeds(sample_ibkr_settings):
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
+
+
+SAMPLE_IBKR_FLEX_XML_PERIOD_TEMPLATE = """
+<FlexQueryResponse queryName="PeriodCheck" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="{from_date}" toDate="{to_date}" period="Custom" whenGenerated="2026-03-15T10:00:00">
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="MSFT" description="MICROSOFT CORP" conid="272120" isin="US5949181045" currency="USD" position="10" markPrice="400.00" positionValue="4000.00" reportDate="{report_date}" />
+      </OpenPositions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="0" fromDate="{from_date}" toDate="{to_date}" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def _import_period_sample(settings, from_date: str, to_date: str, report_date: str):
+    importer = IbkrImporter(
+        period_from=date(2025, 1, 1),
+        period_to=date(2025, 12, 31),
+        account_settings_list=settings,
+    )
+    xml = SAMPLE_IBKR_FLEX_XML_PERIOD_TEMPLATE.format(
+        from_date=from_date, to_date=to_date, report_date=report_date
+    )
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(xml)
+        xml_file_path = tmp_file.name
+    try:
+        return importer.import_files([xml_file_path])
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+
+def test_open_positions_reported_after_period_end_are_rejected(sample_ibkr_settings):
+    with pytest.raises(ValueError, match="reported as of 2026-03-15"):
+        _import_period_sample(sample_ibkr_settings, "2025-01-01", "2026-03-15", "2026-03-15")
+
+
+def test_open_positions_reported_before_period_end_are_rejected(sample_ibkr_settings):
+    with pytest.raises(ValueError, match="reported as of 2025-11-30"):
+        _import_period_sample(sample_ibkr_settings, "2025-01-01", "2025-11-30", "2025-11-30")
+
+
+def test_open_positions_reported_on_new_years_day_are_accepted(sample_ibkr_settings):
+    statement = _import_period_sample(
+        sample_ibkr_settings, "2025-01-01", "2026-01-01", "2026-01-01"
+    )
+    msft_sec = statement.listOfSecurities.depot[0].security[0]
+    assert msft_sec.stock[-1].quantity == Decimal("10")
+
+
+def test_statement_starting_after_period_start_logs_warning(sample_ibkr_settings, caplog):
+    with caplog.at_level("WARNING"):
+        _import_period_sample(sample_ibkr_settings, "2025-06-01", "2025-12-31", "2025-12-31")
+    assert "starts on 2025-06-01, after the tax period start 2025-01-01" in caplog.text

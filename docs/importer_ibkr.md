@@ -16,6 +16,7 @@ OpenSteuerAuszug processes IBKR data using [**Flex Query XML files**](https://ww
     *   Ensure the following sections are included in your query configuration. The importer relies on specific fields within these sections (see below).
 4. [**Run the Flex Query**](https://www.ibkrguides.com/orgportal/performanceandstatements/runflex.htm). Select a *custom date range* that goes from *Jan 1st to Dec 31st in the relevant year*.
     *   **Important**: The "Custom Period" date-range option only appears in the run dialog **after** the Flex Query has been saved. The date-range settings shown while *creating* the query are for periodic automatic reports, not for on-demand runs.
+    *   **The period must end on Dec 31st** (or Jan 1st of the following year). Open positions are taken as the year-end holdings, so the importer stops with an error if they are reported as of any other date. A statement that does not start on Jan 1st only produces a warning, since that is expected for accounts opened during the year.
     *   **Use the IBKR web interface** (desktop browser) to run the query. The mobile app may not expose the "Custom Period" option in the date-range dropdown.
 
 ### Essential Flex Query Sections and Fields:

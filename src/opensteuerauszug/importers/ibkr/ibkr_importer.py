@@ -196,6 +196,59 @@ class IbkrImporter:
         #     f"{self.account_settings_list[0].account_id}"
         # )
 
+    def _is_non_trading_gap(self, after: date, until: date) -> bool:
+        """Return True if every day in (after, until] is a weekend or 1 January.
+
+        IBKR may report a statement ending on such a day (e.g. 1 January)
+        when the query end date is set one day past the year end. No trading
+        can happen on those days, so the holdings equal the year-end holdings.
+        """
+        day = after + timedelta(days=1)
+        while day <= until:
+            if day.weekday() < 5 and not (day.month == 1 and day.day == 1):
+                return False
+            day += timedelta(days=1)
+        return True
+
+    def _check_statement_period(self, stmt: ibflex.FlexStatement, account_id: str) -> None:
+        """Warn when a Flex statement does not cover the full tax period."""
+        from_date = getattr(stmt, "fromDate", None)
+        to_date = getattr(stmt, "toDate", None)
+        if from_date is not None and from_date > self.period_from:
+            logger.warning(
+                "Flex statement for account %s starts on %s, after the tax period start %s. "
+                "Transactions before %s are missing unless the account was opened then.",
+                account_id,
+                from_date,
+                self.period_from,
+                from_date,
+            )
+        if to_date is not None and to_date < self.period_to:
+            logger.warning(
+                "Flex statement for account %s ends on %s, before the tax period end %s. "
+                "Transactions after %s are missing.",
+                account_id,
+                to_date,
+                self.period_to,
+                to_date,
+            )
+
+    def _validate_open_position_report_date(self, report_date: object, symbol: str) -> None:
+        """Ensure an OpenPosition snapshot reflects holdings at the tax period end."""
+        if isinstance(report_date, datetime):
+            report_date = report_date.date()
+        if not isinstance(report_date, date):
+            return
+        if report_date == self.period_to:
+            return
+        if report_date > self.period_to and self._is_non_trading_gap(self.period_to, report_date):
+            return
+        raise ValueError(
+            f"OpenPosition for {symbol} is reported as of {report_date}, but the tax period "
+            f"ends on {self.period_to}. Open positions are used as the year-end holdings, so "
+            f"run the Flex query with a custom period ending on {self.period_to}."
+        )
+
     def _aggregate_stocks(self, stocks: List[SecurityStock]) -> List[SecurityStock]:
         """Aggregate buy and sell entries on the same date with equal order id if present without reordering."""
         return aggregate_mutations(stocks)
@@ -461,6 +514,7 @@ class IbkrImporter:
             account_id = self._get_required_field(stmt, 'accountId', 'FlexStatement')
             # account_id_processed = account_id # Keep track for summary
             logger.info(f"Processing statement for account: {account_id}")
+            self._check_statement_period(stmt, account_id)
 
             def should_skip_entry(entry: Any, entry_label: str) -> bool:
                 if should_skip_pseudo_account_entry(entry):
@@ -611,15 +665,14 @@ class IbkrImporter:
                 for open_pos in stmt.OpenPositions:
                     if should_skip_entry(open_pos, "OpenPosition"):
                         continue
-                    # Ignore the reportDate from the Flex statement and
-                    # use period end + 1 as reference date for the balance
+                    # The reportDate must match the period end (validated
+                    # below), but period end + 1 is used as reference date for the balance
                     # entry. This avoids creating a separate stock entry on
                     # the period end itself which would later result in a
                     # duplicate closing balance.
-                    _ = self._get_required_field(
-                        open_pos, 'reportDate', 'OpenPosition'
-                    )  # validation only
+                    report_date = self._get_required_field(open_pos, 'reportDate', 'OpenPosition')
                     symbol = self._get_required_field(open_pos, 'symbol', 'OpenPosition')
+                    self._validate_open_position_report_date(report_date, symbol)
                     description = self._get_required_field(open_pos, 'description', 'OpenPosition')
                     asset_category = self._get_required_field(
                         open_pos, 'assetCategory', 'OpenPosition'
