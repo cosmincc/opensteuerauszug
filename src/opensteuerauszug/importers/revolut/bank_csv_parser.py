@@ -48,6 +48,14 @@ REQUIRED_COLUMNS = {
     COL_BALANCE,
 }
 
+# Interest rows: Type "Interest" / "Gross Interest" / "Net Interest" (seen in
+# other Revolut parsers), or a description such as "Interest earned".
+_INTEREST_TYPE_RE = re.compile(r"(?i)(gross |net )?interest( paid| earned)?")
+_INTEREST_DESCRIPTION_RE = re.compile(
+    r"(?i)\s*(gross |net )?interest( paid| earned| payment)?(\s+(for|on|from)\b.*)?\s*$"
+)
+_NON_INTEREST_TYPES = {"CARD PAYMENT", "CARD REFUND", "EXCHANGE", "ATM", "TAX", "TAX_REFUND", "FEE"}
+
 _DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%d.%m.%Y %H:%M:%S")
 
 
@@ -71,6 +79,20 @@ class RevolutBankRow:
     @property
     def is_completed(self) -> bool:
         return self.state == "COMPLETED" and self.completed is not None
+
+    @property
+    def is_interest(self) -> bool:
+        """Interest credited to the account (savings / deposit interest)."""
+        return _INTEREST_TYPE_RE.fullmatch(self.type.strip()) is not None or (
+            _INTEREST_DESCRIPTION_RE.match(self.description) is not None
+            and self.type.upper() not in _NON_INTEREST_TYPES
+        )
+
+    @property
+    def is_interest_tax(self) -> bool:
+        """Tax withheld on (or refunded for) interest."""
+        text = f"{self.type} {self.description}".upper()
+        return "TAX" in text and ("INTEREST" in text or "WITHHELD" in text)
 
     @property
     def net_amount(self) -> Decimal:

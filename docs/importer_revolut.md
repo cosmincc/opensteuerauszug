@@ -78,7 +78,9 @@ Do **not** commit or share real exports; they contain your full trading history.
 
 *   **Time zone**: the dates in this export are taken as Swiss local time (the app's local time), unlike the Invest export, which is in UTC.
 
-*   **Not yet handled**: interest on Savings/flexible accounts as income, and fees as expenses. Only balances are reported.
+*   **Interest**: completed rows whose `Type` is `Interest`, `Gross Interest` or `Net Interest`, or whose description is like `Interest earned`, are booked as interest income on their account (dated by `Completed Date`, gross, revenue without Swiss withholding tax). If Revolut lists tax withheld on interest as separate rows (a `Type`/`Description` mentioning tax and interest), the tax is not deducted from the income; its yearly total is shown as a critical warning so you can deal with it in your return. These labels come from other Revolut parsers, not from a verified export: if your interest is missing from the statement, please report the `Type` and `Description` of an interest row.
+
+*   **Not handled**: account fees as expenses.
 
 ## Configuration (`config.toml`)
 
@@ -178,7 +180,7 @@ The cash balance per currency is the running sum of top-ups, withdrawals, trades
 *   No ISINs or company names are exported; tickers that Revolut renamed (e.g. after a company changes its symbol) appear as separate securities.
 *   Corporate actions other than stock splits (spin-offs, mergers, delistings) are not in the known `Type` list and stop processing.
 *   Cash is reconstructed, not read from a balance; verify it against Revolut's statement.
-*   Personal accounts: only year-end balances are reported, not interest income.
+*   Personal accounts: interest labels are recognised from other parsers' documentation, not a verified export.
 *   Crypto and commodities exports are not supported yet.
 
 ## Credits

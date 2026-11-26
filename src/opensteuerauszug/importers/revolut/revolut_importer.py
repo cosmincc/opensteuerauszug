@@ -57,6 +57,7 @@ from opensteuerauszug.importers.common import (
 )
 from opensteuerauszug.model.critical_warning import CriticalWarning, CriticalWarningCategory
 from opensteuerauszug.model.ech0196 import (
+    BankAccountPayment,
     Institution,
     ISINType,
     SecurityCategory,
@@ -794,11 +795,22 @@ class RevolutImporter:
         if not bank_rows:
             return []
         country = self.settings.bank_country if self.settings else "LT"
+        interest, interest_tax = self._personal_account_interest(bank_rows)
         entries: list[CashAccountEntry] = []
         for acc in personal_account_balances(bank_rows, self.period_from, self.period_to):
-            if acc.balance == 0 and not acc.active_in_period:
+            key = (acc.product, acc.currency)
+            if acc.balance == 0 and not acc.active_in_period and not interest.get(key):
                 continue
             label = f"{self._depot_id} {acc.product} {acc.currency}"
+            tax = interest_tax.get(key)
+            if tax:
+                self._warn(
+                    f"Revolut {acc.product} {acc.currency}: tax of {-tax} {acc.currency} was "
+                    f"withheld on interest during {self.period_from.year}. The interest is "
+                    "reported gross; claim the foreign tax yourself if it is recoverable.",
+                    label,
+                    None,
+                )
             if acc.reported_balance is not None and abs(acc.reported_balance - acc.balance) > _CENT:
                 self._warn(
                     f"Revolut {acc.product} {acc.currency}: the balance at {self.period_to} "
@@ -821,13 +833,44 @@ class RevolutImporter:
                     account_id=self._depot_id,
                     currency=acc.currency,
                     closing_balance=balance,
-                    payments=[],
                     country=country,
                     name=label,
                     number=f"{self._depot_id}-{acc.product.upper().replace(' ', '')}-{acc.currency}",
+                    payments=interest.get(key, []),
                 )
             )
         return entries
+
+    def _personal_account_interest(
+        self, bank_rows: Sequence[RevolutBankRow]
+    ) -> tuple[dict[tuple[str, str], list[BankAccountPayment]], dict[tuple[str, str], Decimal]]:
+        """Interest payments and interest tax per (product, currency) in the period.
+
+        Interest is booked gross: when Revolut lists the tax on interest as
+        separate rows, those rows are summed and reported in a warning instead
+        of being deducted from the income.
+        """
+        payments: dict[tuple[str, str], list[BankAccountPayment]] = defaultdict(list)
+        tax: dict[tuple[str, str], Decimal] = defaultdict(Decimal)
+        for r in bank_rows:
+            if not r.is_completed or r.completed is None:
+                continue
+            d = r.completed.date()
+            if not (self.period_from <= d <= self.period_to):
+                continue
+            key = (r.product, r.currency)
+            if r.is_interest_tax:
+                tax[key] += r.net_amount
+            elif r.is_interest:
+                payments[key].append(
+                    BankAccountPayment(
+                        paymentDate=d,
+                        name=(r.description or r.type or "Interest")[:200],
+                        amountCurrency=r.currency,
+                        amount=r.amount,
+                    )
+                )
+        return dict(payments), dict(tax)
 
     def _cash_entries(
         self, cash: dict[str, Decimal], active_in_period: set[str]

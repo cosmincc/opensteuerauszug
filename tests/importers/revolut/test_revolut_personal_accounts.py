@@ -184,3 +184,33 @@ def test_invalid_amount_reports_the_line(tmp_path):
 
     with pytest.raises(RevolutParseError, match="line 2"):
         load_revolut_bank_csv(_write(tmp_path, rows))
+
+
+# fmt: off
+INTEREST_ROWS = [
+    "Topup,Savings,2024-01-02 10:00:00,2024-01-02 10:00:00,To EUR Savings,1000.00,0.00,EUR,COMPLETED,1000.00",
+    "Interest,Savings,2024-01-31 23:00:00,2024-02-01 00:30:00,Interest earned,2.10,0.00,EUR,COMPLETED,1002.10",
+    "Gross Interest,Savings,2024-02-29 23:00:00,2024-03-01 00:30:00,Gross interest,2.00,0.00,EUR,COMPLETED,1004.10",
+    "TAX,Savings,2024-02-29 23:00:00,2024-03-01 00:30:01,Tax withheld on interest,-0.30,0.00,EUR,COMPLETED,1003.80",
+    "Interest,Savings,2023-12-31 23:00:00,2023-12-31 23:30:00,Interest earned,1.00,0.00,EUR,COMPLETED,1004.80",
+    "Fee,Current,2024-03-01 00:00:00,2024-03-01 00:00:00,Interest Bearing Account fee,0.00,1.00,EUR,COMPLETED,99.00",
+]
+# fmt: on
+
+
+def test_savings_interest_in_the_year_is_booked_gross_on_its_account(tmp_path):
+    statement = RevolutImporter(PERIOD_FROM, PERIOD_TO, []).import_path(
+        _write(tmp_path, INTEREST_ROWS)
+    )
+
+    accounts = {a.bankAccountNumber: a for a in statement.listOfBankAccounts.bankAccount}
+    savings = accounts["REVOLUT-SAVINGS-EUR"]
+    assert [(p.paymentDate, p.amount, p.name) for p in savings.payment] == [
+        (date(2024, 2, 1), Decimal("2.10"), "Interest earned"),
+        (date(2024, 3, 1), Decimal("2.00"), "Gross interest"),
+    ]
+    assert all(p.amountCurrency == "EUR" for p in savings.payment)
+    # The fee mentioning interest is not income.
+    assert accounts["REVOLUT-CURRENT-EUR"].payment == []
+    # Tax on interest is not netted off the income but reported for review.
+    assert any("tax of 0.30 EUR" in w.message for w in statement.critical_warnings)
