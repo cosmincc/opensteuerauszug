@@ -55,6 +55,23 @@ IBKR_ASSET_CATEGORY_TO_ECH_SECURITY_CATEGORY: Final[Dict[str, SecurityCategory]]
 }
 
 
+def country_from_isin(isin: object | None) -> str | None:
+    """Return the country prefix of an ISIN, or None if it is not a country.
+
+    ISO 3166 user-assigned codes (AA, QM-QZ, XA-XZ, ZZ) and EU are used for
+    international or supranational issues (e.g. XS Eurobonds), so they do
+    not identify an issuer country.
+    """
+    if not isin:
+        return None
+    prefix = str(isin)[:2].upper()
+    if len(prefix) != 2 or not prefix.isalpha():
+        return None
+    if prefix in ("AA", "ZZ", "EU") or prefix[0] == "X" or ("QM" <= prefix <= "QZ"):
+        return None
+    return prefix
+
+
 def is_summary_level(entry: object) -> bool:
     """Return True when an entry is marked with levelOfDetail SUMMARY."""
     level_of_detail = getattr(entry, "levelOfDetail", None)
@@ -140,7 +157,8 @@ class IbkrImporter:
         if value is None:
             return None
         country = str(value).strip().upper()
-        if not country:
+        # IBKR uses "XX" when the issuer country is unknown.
+        if not country or country == "XX":
             return None
         return country[:2]
 
@@ -1045,7 +1063,9 @@ class IbkrImporter:
             skip_if_zero = is_rights and ignore_rights_issues_by_account.get(sec_pos.depot, False)
             return PositionHints(
                 security_category=sec_category,
-                country=security_country_map.get(sec_pos, "US"),
+                country=(
+                    security_country_map.get(sec_pos) or country_from_isin(sec_pos.isin) or "US"
+                ),
                 is_rights_issue=is_rights,
                 skip_if_zero=skip_if_zero,
             )

@@ -7,6 +7,7 @@ import tempfile
 
 from opensteuerauszug.importers.ibkr.ibkr_importer import (
     IbkrImporter,
+    country_from_isin,
     is_summary_level,
     should_skip_pseudo_account_entry,
 )
@@ -3121,6 +3122,60 @@ def test_bond_interest_import_succeeds(sample_ibkr_settings):
         assert payment.amount == Decimal("1937.5")
         assert payment.amountCurrency == "USD"
         assert payment.paymentDate == date(2023, 2, 17)
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
+
+
+@pytest.mark.parametrize(
+    "isin, expected",
+    [
+        ("IE00B3RBWM25", "IE"),
+        ("CH0038863350", "CH"),
+        ("XS1234567890", None),
+        ("EU000A1G0BN7", None),
+        ("QS0000000000", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_country_from_isin_ignores_non_country_prefixes(isin, expected):
+    assert country_from_isin(isin) == expected
+
+
+SAMPLE_IBKR_FLEX_XML_NO_ISSUER_COUNTRY = """
+<FlexQueryResponse queryName="NoIssuerCountry" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" subCategory="ETF" symbol="VWRL" description="VANGUARD FTSE ALL-WORLD" conid="12345001" isin="IE00B3RBWM25" issuerCountryCode="" currency="CHF" position="10" markPrice="100.00" positionValue="1000.00" reportDate="2025-12-31" />
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="NESN" description="NESTLE SA-REG" conid="12345002" isin="CH0038863350" issuerCountryCode="XX" currency="CHF" position="5" markPrice="80.00" positionValue="400.00" reportDate="2025-12-31" />
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="NOISIN" description="NO ISIN CORP" conid="12345003" isin="" issuerCountryCode="" currency="USD" position="1" markPrice="10.00" positionValue="10.00" reportDate="2025-12-31" />
+      </OpenPositions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="CHF" endingCash="0" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_missing_issuer_country_is_taken_from_isin_prefix(sample_ibkr_settings):
+    importer = IbkrImporter(
+        period_from=date(2025, 1, 1),
+        period_to=date(2025, 12, 31),
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_NO_ISSUER_COUNTRY)
+        xml_file_path = tmp_file.name
+
+    try:
+        statement = importer.import_files([xml_file_path])
+        countries = {s.symbol: s.country for s in statement.listOfSecurities.depot[0].security}
+        assert countries == {"12345001": "IE", "12345002": "CH", "12345003": "US"}
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
