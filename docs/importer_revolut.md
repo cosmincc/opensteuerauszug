@@ -13,7 +13,14 @@ As stated in the [Disclaimer](user_guide.md#disclaimer-and-user-responsibility):
 
 ## Overview
 
-The importer reads the **Revolut Invest account statement** in CSV format. That file is a transaction log of the investment account: trades, dividends, stock splits, custody fees and cash movements. It contains no holdings snapshot, so the importer rebuilds every position by replaying the account history from the start. **The export must therefore cover the whole history of the account ("All time")**, not just the tax year.
+The importer reads two kinds of Revolut CSV export, alone or together:
+
+*   the **personal account statement** (current account and pockets such as Savings), for year-end cash balances; see [Personal accounts](#personal-accounts);
+*   the **Revolut Invest account statement**, for shares, dividends and investment cash.
+
+Put the files in one directory and pass that directory; each file's kind is recognised from its header. Crypto and commodities exports are not supported yet.
+
+The Invest file is described first. That file is a transaction log of the investment account: trades, dividends, stock splits, custody fees and cash movements. It contains no holdings snapshot, so the importer rebuilds every position by replaying the account history from the start. **The export must therefore cover the whole history of the account ("All time")**, not just the tax year.
 
 Because the experimental flag is required, enable it in the `[general]` section of `config.toml`:
 
@@ -53,6 +60,25 @@ experimental_importers = true
 *   **Several files**: you can pass a directory instead of a file. Every CSV in it that has the Revolut header is read, and rows repeated in overlapping exports are counted once. Other CSV files in the directory are ignored.
 
 Do **not** commit or share real exports; they contain your full trading history.
+
+## Personal accounts
+
+*   **How to obtain** (Revolut app): open the account (Home), tap **…** → **Statement**, choose **Excel** (CSV) and set the period to cover **at least the tax year** (ideally from account opening). The export is named like `revolut-account-statement_<from>_<to>_en_<id>.csv` and holds all currencies and pockets in one file. Revolut moves these menus around; the steps may differ slightly.
+
+*   **Expected layout**:
+
+    ```csv
+    Type,Product,Started Date,Completed Date,Description,Amount,Fee,Currency,State,Balance
+    Card Payment,Current,2024-03-01 12:00:00,2024-03-02 08:00:00,Shop,-12.50,0.00,EUR,COMPLETED,987.50
+    ```
+
+*   **Treatment**: every combination of `Product` (`Current`, `Savings`, …) and `Currency` becomes its own bank account in the Steuerauszug, numbered `<account_number>-<PRODUCT>-<CURRENCY>` (e.g. `REVOLUT-CURRENT-EUR`), with country `bank_country` (default `LT`, Revolut Bank UAB). The year-end balance is computed from the `COMPLETED` rows (`Amount − Fee`) dated by their `Completed Date`, starting from the balance the export shows before its first row, so an export that starts mid-history still works. `REVERTED` and `PENDING` rows are ignored. Accounts with a zero balance and no activity in the year are left out.
+
+*   **Cross-check**: Revolut's own `Balance` column is compared with the computed balance; a difference is flagged as a critical warning. A few rows (cashback, refunded fees) carry an out-of-order `Balance` snapshot in real exports, which is why the column is not used directly.
+
+*   **Time zone**: the dates in this export are taken as Swiss local time (the app's local time), unlike the Invest export, which is in UTC.
+
+*   **Not yet handled**: interest on Savings/flexible accounts as income, and fees as expenses. Only balances are reported.
 
 ## Configuration (`config.toml`)
 
@@ -152,7 +178,8 @@ The cash balance per currency is the running sum of top-ups, withdrawals, trades
 *   No ISINs or company names are exported; tickers that Revolut renamed (e.g. after a company changes its symbol) appear as separate securities.
 *   Corporate actions other than stock splits (spin-offs, mergers, delistings) are not in the known `Type` list and stop processing.
 *   Cash is reconstructed, not read from a balance; verify it against Revolut's statement.
-*   Only the Invest (stocks) account statement is supported. Savings, crypto and commodities exports are out of scope.
+*   Personal accounts: only year-end balances are reported, not interest income.
+*   Crypto and commodities exports are not supported yet.
 
 ## Credits
 

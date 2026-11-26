@@ -66,6 +66,7 @@ from opensteuerauszug.model.ech0196 import (
 )
 from opensteuerauszug.model.position import SecurityPosition
 
+from .bank_csv_parser import RevolutBankRow, is_revolut_bank_csv, load_revolut_bank_csv
 from .csv_parser import RevolutParseError, RevolutRow, is_revolut_csv, load_revolut_csv
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,102 @@ def merge_rows(files_rows: Sequence[list[RevolutRow]]) -> list[RevolutRow]:
     return sorted(merged, key=lambda r: r.timestamp)
 
 
+def _bank_row_key(r: RevolutBankRow) -> tuple:
+    return (
+        r.product,
+        r.currency,
+        r.type,
+        r.started,
+        r.completed,
+        r.description,
+        r.amount,
+        r.fee,
+        r.state,
+        r.balance,
+    )
+
+
+def merge_bank_rows(files_rows: Sequence[list[RevolutBankRow]]) -> list[RevolutBankRow]:
+    """Merge personal account statements like :func:`merge_rows` does."""
+    max_counts: Counter = Counter()
+    for rows in files_rows:
+        for key, count in Counter(_bank_row_key(r) for r in rows).items():
+            max_counts[key] = max(max_counts[key], count)
+    emitted: Counter = Counter()
+    merged = []
+    for rows in files_rows:
+        for r in rows:
+            key = _bank_row_key(r)
+            if emitted[key] < max_counts[key]:
+                emitted[key] += 1
+                merged.append(r)
+    return merged
+
+
+@dataclass
+class PersonalAccountBalance:
+    """Year-end state of one Revolut personal account (product + currency)."""
+
+    product: str
+    currency: str
+    balance: Decimal
+    reported_balance: Decimal | None
+    active_in_period: bool
+    first_activity: date | None
+    last_activity: date | None
+
+
+def personal_account_balances(
+    rows: Sequence[RevolutBankRow], period_from: date, period_to: date
+) -> list[PersonalAccountBalance]:
+    """Balance of each (product, currency) account at the end of *period_to*.
+
+    The balance is the running total of completed rows (amount minus fee),
+    anchored on the balance the export reports before its first row, so a
+    partial export still gives the right result. Revolut's own ``Balance``
+    column is kept for cross-checking: a few rows (cashback, fee refunds)
+    carry a balance snapshot out of order, so it is not used directly.
+    """
+    by_account: dict[tuple[str, str], list[RevolutBankRow]] = defaultdict(list)
+    for r in rows:
+        if r.is_completed:
+            by_account[(r.product, r.currency)].append(r)
+
+    result = []
+    for (product, currency), account_rows in sorted(by_account.items()):
+        account_rows.sort(key=lambda r: (r.completed, r.started))
+        first = account_rows[0]
+        running = (first.balance - first.net_amount) if first.balance is not None else Decimal(0)
+        reported: Decimal | None = None
+        active = False
+        last_date: date | None = None
+        for r in account_rows:
+            assert r.completed is not None
+            d = r.completed.date()
+            if d > period_to:
+                break
+            running += r.net_amount
+            if r.balance is not None:
+                reported = r.balance
+            last_date = d
+            if d >= period_from:
+                active = True
+        if last_date is None:
+            continue  # account opened after the period
+        result.append(
+            PersonalAccountBalance(
+                product=product,
+                currency=currency,
+                balance=running,
+                reported_balance=reported,
+                active_in_period=active,
+                first_activity=first.completed.date() if first.completed else None,
+                last_activity=last_date,
+            )
+        )
+    return result
+
+
 @dataclass
 class _Dividend:
     row: RevolutRow
@@ -221,24 +318,41 @@ class RevolutImporter:
         p = Path(path)
         if p.is_dir():
             files = sorted(f for f in p.iterdir() if f.suffix.lower() == ".csv" and f.is_file())
-            revolut_files = [f for f in files if is_revolut_csv(f)]
-            for f in files:
-                if f not in revolut_files:
-                    logger.info("Ignoring %s: not a Revolut account statement", f)
-            if not revolut_files:
-                raise FileNotFoundError(f"No Revolut account statement CSV found in {p}")
-            return self.import_files(revolut_files)
+            if not any(is_revolut_csv(f) or is_revolut_bank_csv(f) for f in files):
+                raise FileNotFoundError(f"No Revolut statement CSV found in {p}")
+            return self.import_files(files)
         if not p.is_file():
             raise FileNotFoundError(f"Revolut input not found: {p}")
         return self.import_files([p])
 
     def import_files(self, paths: Iterable[str | Path]) -> TaxStatement:
-        """Import explicit CSV files and return a TaxStatement."""
-        files_rows = [load_revolut_csv(p) for p in paths]
-        rows = merge_rows(files_rows)
-        return self.import_rows(rows)
+        """Import explicit CSV files and return a TaxStatement.
 
-    def import_rows(self, rows: Sequence[RevolutRow]) -> TaxStatement:
+        Each file may be an Invest account statement or a personal account
+        statement; the kind is recognised from its header.
+        """
+        invest_rows: list[list[RevolutRow]] = []
+        bank_rows: list[list[RevolutBankRow]] = []
+        for path in map(Path, paths):
+            if is_revolut_bank_csv(path):
+                bank_rows.append(load_revolut_bank_csv(path))
+            elif is_revolut_csv(path):
+                invest_rows.append(load_revolut_csv(path))
+            else:
+                if path.suffix.lower() == ".csv":
+                    logger.info("Ignoring %s: not a Revolut statement", path)
+                    continue
+                raise RevolutParseError(f"{path} is not a Revolut statement CSV")
+        if not invest_rows and not bank_rows:
+            raise RevolutParseError("No Revolut statement CSV among the inputs")
+        rows = merge_rows(invest_rows) if invest_rows else []
+        return self.import_rows(rows, bank_rows=merge_bank_rows(bank_rows))
+
+    def import_rows(
+        self,
+        rows: Sequence[RevolutRow],
+        bank_rows: Sequence[RevolutBankRow] = (),
+    ) -> TaxStatement:
         """Build the TaxStatement from already-parsed rows."""
         self._warnings = []
         self._currency_hint = {}
@@ -415,10 +529,11 @@ class RevolutImporter:
             assume_zero_if_no_balances=True,
         )
 
-        if self.settings is None or self.settings.include_cash:
-            augment_list_of_bank_accounts(
-                statement, self._cash_entries(cash, cash_active_in_period)
-            )
+        cash_entries: list[CashAccountEntry] = []
+        if rows and (self.settings is None or self.settings.include_cash):
+            cash_entries.extend(self._cash_entries(cash, cash_active_in_period))
+        cash_entries.extend(self._personal_account_entries(bank_rows))
+        augment_list_of_bank_accounts(statement, cash_entries)
 
         statement.critical_warnings.extend(self._warnings)
         return statement
@@ -671,6 +786,48 @@ class RevolutImporter:
         )
         if client is not None:
             statement.client = [client]
+
+    def _personal_account_entries(
+        self, bank_rows: Sequence[RevolutBankRow]
+    ) -> list[CashAccountEntry]:
+        """Bank accounts for the Revolut personal account and its pockets."""
+        if not bank_rows:
+            return []
+        country = self.settings.bank_country if self.settings else "LT"
+        entries: list[CashAccountEntry] = []
+        for acc in personal_account_balances(bank_rows, self.period_from, self.period_to):
+            if acc.balance == 0 and not acc.active_in_period:
+                continue
+            label = f"{self._depot_id} {acc.product} {acc.currency}"
+            if acc.reported_balance is not None and abs(acc.reported_balance - acc.balance) > _CENT:
+                self._warn(
+                    f"Revolut {acc.product} {acc.currency}: the balance at {self.period_to} "
+                    f"computed from the transactions ({acc.balance}) differs from the last "
+                    f"balance in the export ({acc.reported_balance}). The computed value was "
+                    "used; check it against the year-end statement in the Revolut app.",
+                    label,
+                    None,
+                )
+            balance = acc.balance
+            if balance < 0:
+                self._warn(
+                    f"Revolut {acc.product} {acc.currency} balance at {self.period_to} is "
+                    f"negative ({balance}).",
+                    label,
+                    None,
+                )
+            entries.append(
+                CashAccountEntry(
+                    account_id=self._depot_id,
+                    currency=acc.currency,
+                    closing_balance=balance,
+                    payments=[],
+                    country=country,
+                    name=label,
+                    number=f"{self._depot_id}-{acc.product.upper().replace(' ', '')}-{acc.currency}",
+                )
+            )
+        return entries
 
     def _cash_entries(
         self, cash: dict[str, Decimal], active_in_period: set[str]
