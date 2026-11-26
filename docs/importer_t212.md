@@ -226,7 +226,21 @@ Balances are reconstructed backwards from today's live position. The API order h
 
 ### How dividends are reported
 
-Each dividend becomes a gross payment (`No. of shares × Price / share`) in the instrument currency, plus a separate withholding-tax payment in the currency T212 reports it in. This is the same convention as the other importers, and the payment reconciliation relies on it. Prices quoted in pence (`GBX`) are converted to `GBP`.
+On a CSV dividend row, `Price / share` is the dividend per share **after** withholding tax, and `Total` is the net amount credited in the account currency. Each dividend becomes a gross payment in the instrument currency (`No. of shares × Price / share + Withholding tax`) and a separate withholding-tax payment in the currency T212 reports it in. If the tax is stated in the account currency, the gross is `Total + Withholding tax` in that currency. This is the same convention as the other importers, and the payment reconciliation relies on it. T212 rounds the tax to cents, so on very small dividends the gross can differ slightly from the Kursliste. The `Exchange rate` on dividend rows is ignored: older exports give `Not available`, and newer ones give it in the opposite direction. Prices quoted in pence (`GBX`) are converted to `GBP`.
+
+### Export formats and dates
+
+All three CSV layouts Trading212 has produced are read: the old one with `Total (GBP)` / `Result (GBP)` columns, the one with `Time` and `Total` + `Currency (Total)`, and the current one with `Time (UTC)` and the extra fee and conversion columns. Trading212 states every time in UTC. Dates are converted to Swiss time (Europe/Zurich), so a trade at 23:30 UTC on 31 December belongs to the next Swiss tax year.
+
+When several exports overlap, rows with a T212 `ID` are counted once by ID. Rows without one, such as dividends, are counted once when their action, time (to the second), ISIN, ticker, shares, price, total and tax all match, even if the two exports use different column layouts.
+
+### Stock splits and share movements
+
+Split rows are applied as quantity changes: `Stock split close` removes the old position and `Stock split open` adds the new one. The halves may sit in different exports. The older single `Stock Split` row adds the shares it states.
+
+Trading212 often has no row at all for splits before December 2024 (for example NVIDIA's 10-for-1 split of 10 June 2024). For a list of well-known splits (the list documented by capital-gains-calculator), the importer adds the missing split itself when you held the share across it and the export has no split row near that date. Each such case raises a critical warning naming the split and the shares added. Any other missing split can still corrupt quantities, so compare the closing balances with your Trading212 statement.
+
+`Transfer in`, `Transfer out`, `Stock distribution` and `Custom stock distribution` rows are applied to the holding and raise a critical warning, because their tax treatment (stock dividend, demerger, takeover, transfer) cannot be told from the row. `Spin off` and any other unknown action is skipped with a critical warning. Card rows, deposits, withdrawals, currency conversions, cashback and result adjustments do not affect securities and are ignored.
 
 ### Cash balances
 

@@ -17,10 +17,22 @@ from ._models import (
 
 logger = logging.getLogger(__name__)
 
-BUY_ACTIONS = {"Market buy", "Limit buy", "Stop buy"}
+BUY_ACTIONS = {"Market buy", "Limit buy", "Stop buy", "Stop limit buy"}
 SELL_ACTIONS = {"Market sell", "Limit sell", "Stop sell", "Stop limit sell"}
+# A reorganisation is two rows: "close" states the complete position before
+# it, "open" the complete position after it (either order, possibly in two
+# different exports).
 SPLIT_OPEN_ACTIONS = {"Stock split open"}
 SPLIT_CLOSE_ACTIONS = {"Stock split close"}
+# Older exports state a split as one row whose "No. of shares" is the number
+# of shares the split added (negative for a consolidation).
+SPLIT_DELTA_ACTIONS = {"Stock Split"}
+# Share movements without cash.  Their quantity changes the holding (and so
+# the wealth tax value); the importer applies them and raises a critical
+# warning because their tax treatment (stock dividend, demerger, takeover,
+# transfer between accounts) cannot be told from the row.
+SHARES_IN_ACTIONS = {"Stock distribution", "Custom stock distribution", "Transfer in"}
+SHARES_OUT_ACTIONS = {"Transfer out"}
 # T212 exports dividends with optional sub-type suffixes, e.g.:
 #   "Dividend (Ordinary)", "Dividend (Dividends paid by us corporations)", "Dividend (Bonus)"
 # Match by prefix so new sub-types are handled automatically.
@@ -32,6 +44,9 @@ IGNORED_ACTIONS = {
     "Currency conversion",
     "Market order",
     "Spending cashback",
+    "Card credit",
+    "Card debit",
+    "Card refund",
     # Cash adjustments (WHT refunds, interest reversals) — no ticker, not attributable
     "Result adjustment",
 }
@@ -40,6 +55,7 @@ IGNORED_ACTIONS = {
 COLUMN_ALIASES: dict[str, str] = {
     "Action": "action",
     "Time": "time",
+    "Time (UTC)": "time",  # newer exports
     "ISIN": "isin",
     "Ticker": "ticker",
     "Name": "name",
@@ -48,10 +64,12 @@ COLUMN_ALIASES: dict[str, str] = {
     "Currency (Price / share)": "price_currency",
     "Exchange rate": "fx_rate",
     "Total": "total",
+    "Total (GBP)": "total_gbp",  # older exports: totals always in GBP
     "Currency (Total)": "total_currency",
     "Withholding tax": "withholding_tax",
     "Currency (Withholding tax)": "withholding_tax_currency",
     "Result": "result",
+    "Result (GBP)": "result",
     "Currency (Result)": "result_currency",
     "Notes": "notes",
 }
@@ -76,6 +94,7 @@ class T212CsvParser:
         self._paths: List[str] = [csv_path] if isinstance(csv_path, str) else list(csv_path)
         self._path = ", ".join(self._paths)
         self.unknown_actions: Counter[str] = Counter()
+        self.share_movements: Counter[str] = Counter()
         self.earliest_date: Optional[date] = None
         self.latest_date: Optional[date] = None
 
@@ -97,11 +116,14 @@ class T212CsvParser:
 
                 for row_num, raw_row in enumerate(reader, start=2):
                     row = {col_map[k]: v for k, v in raw_row.items() if k in col_map}
+                    if "total" not in row and "total_gbp" in row:
+                        row["total"] = row["total_gbp"]
+                        row.setdefault("total_currency", "GBP")
                     action = (row.get("action") or "").strip()
                     if not action:
                         continue
 
-                    dedup_key = _row_dedup_key(raw_row)
+                    dedup_key = _row_dedup_key(row, raw_row)
                     if dedup_key in seen_rows:
                         logger.debug("CSV row %d (%s): duplicate row, skipping", row_num, path)
                         continue
@@ -112,10 +134,21 @@ class T212CsvParser:
                         order = _parse_order(action, row, row_num, path)
                         if order is not None:
                             orders.append(order)
-                    elif action in SPLIT_OPEN_ACTIONS or action in SPLIT_CLOSE_ACTIONS:
+                    elif (
+                        action in SPLIT_OPEN_ACTIONS
+                        or action in SPLIT_CLOSE_ACTIONS
+                        or action in SPLIT_DELTA_ACTIONS
+                    ):
                         order = _parse_split(action, row, row_num, path)
                         if order is not None:
                             orders.append(order)
+                    elif action in SHARES_IN_ACTIONS or action in SHARES_OUT_ACTIONS:
+                        order = _parse_split(action, row, row_num, path)
+                        if order is not None:
+                            order.is_split = False
+                            order.is_share_movement = True
+                            orders.append(order)
+                            self.share_movements[action] += 1
                     elif action.startswith(DIVIDEND_ACTION_PREFIX):
                         div = _parse_dividend(action, row, row_num, path)
                         if div is not None:
@@ -153,12 +186,39 @@ class T212CsvParser:
             self.latest_date = d
 
 
-def _row_dedup_key(raw_row: dict) -> tuple:
-    """Key identifying a CSV row across (possibly overlapping) exports."""
+def _row_dedup_key(row: dict, raw_row: dict) -> tuple:
+    """Key identifying a CSV row across (possibly overlapping) exports.
+
+    Rows with a T212 ``ID`` are keyed by it.  Dividends and some other rows
+    have no ID; they are keyed by their content.  Only the fields that state
+    the transaction are used, with the timestamp cut to whole seconds, so two
+    exports with different column sets (or one with milliseconds and one
+    without) still recognise the same row.  Note that genuinely distinct rows
+    with identical content and timestamp (e.g. two dividends of one share
+    paid in the same second) would also be merged; T212 does not produce
+    those.
+    """
+    action = (row.get("action") or "").strip()
     row_id = (raw_row.get("ID") or "").strip()
     if row_id:
-        return ("id", (raw_row.get("Action") or "").strip(), row_id)
-    return ("row",) + tuple(sorted((k, (v or "").strip()) for k, v in raw_row.items() if k))
+        return ("id", action, row_id)
+
+    def num(field: str) -> Optional[Decimal]:
+        value = _parse_decimal(row.get(field))
+        return value.normalize() if value is not None else None
+
+    time = (row.get("time") or "").strip().replace("T", " ")[:19]
+    return (
+        "row",
+        action,
+        time,
+        (row.get("isin") or "").strip(),
+        (row.get("ticker") or "").strip(),
+        num("quantity"),
+        num("price"),
+        num("total"),
+        num("withholding_tax"),
+    )
 
 
 def _build_column_map(fieldnames: Sequence[str]) -> dict[str, str]:
@@ -230,13 +290,16 @@ def _parse_order(action: str, row: dict, row_num: int, path: str) -> Optional[T2
 def _parse_dividend(action: str, row: dict, row_num: int, path: str) -> Optional[T212Dividend]:
     """Parse a dividend row.
 
-    T212 semantics (verified against real exports):
+    T212 semantics (verified against real exports 2020-2026, and consistent
+    with the analysis in KapJI/capital-gains-calculator):
       * ``No. of shares``      – shares entitled to the dividend
-      * ``Price / share``      – *gross* dividend per share, in
-        ``Currency (Price / share)`` (the instrument currency)
+      * ``Price / share``      – dividend per share *after* withholding tax,
+        in ``Currency (Price / share)`` (the instrument currency)
       * ``Withholding tax``    – tax withheld, in ``Currency (Withholding tax)``
       * ``Total``              – *net* amount credited, in ``Currency (Total)``
         (the account currency)
+      * ``Exchange rate``      – not reliable on dividend rows ("Not available"
+        in older exports, inverted direction in newer ones); not used.
     """
     ticker = (row.get("ticker") or "").strip()
     if not ticker:
@@ -247,7 +310,7 @@ def _parse_dividend(action: str, row: dict, row_num: int, path: str) -> Optional
         amount_raw = _parse_decimal(row.get("total"))
         amount = amount_raw if amount_raw is not None else Decimal("0")
         price_ccy_raw = (row.get("price_currency") or "").strip()
-        gross_per_share, instrument_currency = normalize_currency(
+        net_per_share, instrument_currency = normalize_currency(
             _parse_decimal(row.get("price")), price_ccy_raw
         )
         wht_raw = _parse_decimal(row.get("withholding_tax"))
@@ -262,7 +325,8 @@ def _parse_dividend(action: str, row: dict, row_num: int, path: str) -> Optional
             name=(row.get("name") or ticker).strip(),
             isin=(row.get("isin") or "").strip() or None,
             amount_account_currency=amount,
-            gross_per_share=gross_per_share,
+            gross_per_share=None,
+            net_per_share=net_per_share,
             withholding_tax=wht if wht else None,
             instrument_currency=instrument_currency or account_currency,
             fx_rate=_parse_decimal(row.get("fx_rate")),
@@ -279,8 +343,19 @@ def _parse_dividend(action: str, row: dict, row_num: int, path: str) -> Optional
 
 
 def _parse_split(action: str, row: dict, row_num: int, path: str) -> Optional[T212Order]:
-    """Parse a stock-split row as a quantity-only mutation (no unit price)."""
-    side = "BUY" if action in SPLIT_OPEN_ACTIONS else "SELL"
+    """Parse a share movement without cash as a quantity-only mutation.
+
+    Used for split halves ("Stock split open" adds the new count, "Stock split
+    close" removes the old count), single-row "Stock Split" rows (the shares
+    added, negative for a consolidation) and transfers / stock distributions.
+    """
+    qty_preview = _parse_decimal(row.get("quantity"))
+    if action in SPLIT_DELTA_ACTIONS:
+        side = "BUY" if qty_preview is None or qty_preview >= 0 else "SELL"
+    elif action in SPLIT_OPEN_ACTIONS or action in SHARES_IN_ACTIONS:
+        side = "BUY"
+    else:
+        side = "SELL"
     ticker = (row.get("ticker") or "").strip()
     if not ticker:
         logger.warning("CSV row %d (%s): missing ticker for stock split, skipping", row_num, path)
@@ -302,7 +377,7 @@ def _parse_split(action: str, row: dict, row_num: int, path: str) -> Optional[T2
             ticker=ticker,
             name=(row.get("name") or ticker).strip(),
             isin=(row.get("isin") or "").strip() or None,
-            quantity=qty,
+            quantity=abs(qty),
             price=Decimal("0"),  # No meaningful unit price for a split
             currency=normalize_currency(None, row.get("price_currency") or "")[1],
             fx_rate=None,

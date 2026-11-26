@@ -1,6 +1,7 @@
 """T212-to-eCH-0196 converters for the Trading212 importer."""
 
 import logging
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
 from opensteuerauszug.importers.common.payments import build_security_payment
@@ -68,18 +69,50 @@ def _dividend_to_payments(div: T212Dividend, currency: str) -> List[SecurityPaym
     """
     label = div.action or "Dividend"
     description = f"Dividend {div.ticker}"
+    instrument_currency = div.instrument_currency or currency
+    wht = abs(div.withholding_tax) if div.withholding_tax else Decimal("0")
+    wht_currency = div.withholding_currency or instrument_currency
+    # Reversals ("Dividend adjustment" taking a payment back) have a negative total.
+    sign = Decimal("-1") if div.amount_account_currency < 0 else Decimal("1")
+    amount_per_unit: Optional[Decimal] = None
+
     if div.quantity is not None and div.gross_per_share is not None:
+        # API: gross per share is given directly.
         amount = div.quantity * div.gross_per_share
-        amount_currency = div.instrument_currency or currency
+        amount_currency = instrument_currency
+        amount_per_unit = div.gross_per_share
+    elif (
+        div.quantity is not None
+        and div.net_per_share is not None
+        and (not wht or wht_currency == instrument_currency)
+    ):
+        # CSV: "Price / share" is after withholding; add the tax back.
+        amount = sign * (abs(div.quantity * div.net_per_share) + wht)
+        amount_currency = instrument_currency
+        if div.quantity:
+            amount_per_unit = abs(amount) / abs(div.quantity)
+    elif wht and div.account_currency and wht_currency == div.account_currency:
+        # Tax stated in the account currency: gross = net credited + tax.
+        amount = sign * (abs(div.amount_account_currency) + wht)
+        amount_currency = div.account_currency
     else:
-        logger.warning(
-            "Dividend %s on %s: no share count / gross per share; using net amount "
-            "credited in account currency.",
-            div.ticker,
-            div.paid_on,
-        )
+        if wht:
+            logger.warning(
+                "Dividend %s on %s: withholding tax in %s cannot be added back to the "
+                "net amount; reporting the net amount received.",
+                div.ticker,
+                div.paid_on,
+                wht_currency,
+            )
+        else:
+            logger.warning(
+                "Dividend %s on %s: no share count / per-share amount; using net amount "
+                "credited in account currency.",
+                div.ticker,
+                div.paid_on,
+            )
         amount = div.amount_account_currency
-        amount_currency = div.account_currency or div.instrument_currency or currency
+        amount_currency = div.account_currency or instrument_currency
 
     payment = build_security_payment(
         payment_date=div.paid_on,
@@ -90,17 +123,17 @@ def _dividend_to_payments(div: T212Dividend, currency: str) -> List[SecurityPaym
     )
     if div.quantity is not None:
         payment.quantity = div.quantity
-    if div.gross_per_share is not None and amount_currency == (div.instrument_currency or currency):
-        payment.amountPerUnit = div.gross_per_share
+    if amount_per_unit is not None:
+        payment.amountPerUnit = amount_per_unit
     payments = [payment]
 
-    if div.withholding_tax:
+    if wht:
         payments.append(
             build_security_payment(
                 payment_date=div.paid_on,
                 description=description,
-                currency=div.withholding_currency or amount_currency,
-                amount=-abs(div.withholding_tax),
+                currency=wht_currency,
+                amount=-sign * wht,
                 broker_label="Withholding tax",
                 is_withholding=True,
             )

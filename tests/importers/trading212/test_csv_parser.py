@@ -118,7 +118,7 @@ class TestCsvParser:
         assert len(orders) == 0
         assert len(dividends) == 1
         assert dividends[0].amount_account_currency == Decimal("2.30")
-        assert dividends[0].gross_per_share == Decimal("0.25")
+        assert dividends[0].net_per_share == Decimal("0.25")
 
     def test_parser_gross_per_share_none_when_price_missing(self, tmp_path):
         csv_path = tmp_path / "t.csv"

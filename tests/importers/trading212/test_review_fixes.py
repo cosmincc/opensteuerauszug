@@ -60,7 +60,9 @@ class TestCsvDividendParsing:
         _, divs, _ = T212CsvParser(str(f)).parse()
         (d,) = divs
         assert d.quantity == Decimal("2")
-        assert d.gross_per_share == Decimal("0.61")
+        # "Price / share" on a dividend row is after withholding tax
+        assert d.gross_per_share is None
+        assert d.net_per_share == Decimal("0.61")
         assert d.instrument_currency == "USD"
         assert d.amount_account_currency == Decimal("0.84")
         assert d.account_currency == "CHF"
@@ -73,8 +75,9 @@ class TestCsvDividendParsing:
         stmt = _importer().import_from(str(f))
         sec = stmt.listOfSecurities.depot[0].security[0]
         div, wht = sec.payment
+        # gross = 2 x 0.61 (net per share) + 0.18 tax
         assert (div.amount, div.amountCurrency, div.quantity) == (
-            Decimal("1.22"),
+            Decimal("1.40"),
             "USD",
             Decimal("2"),
         )
@@ -137,9 +140,9 @@ class TestMultiFileCsv:
 class TestUnknownActions:
     def test_unknown_action_becomes_critical_warning(self, tmp_path):
         f = tmp_path / "a.csv"
-        write_csv(f, [BUY_2024, dict(BUY_2024, Action="Stock distribution")])
+        write_csv(f, [BUY_2024, dict(BUY_2024, Action="Spin off")])
         stmt = _importer().import_from(str(f))
-        assert any("Stock distribution" in w.message for w in stmt.critical_warnings)
+        assert any("Spin off" in w.message for w in stmt.critical_warnings)
 
 
 class TestTickerDisambiguation:

@@ -312,9 +312,9 @@ class TestHybridMode:
         sec = stmt.listOfSecurities.depot[0].security[0]
         assert len(sec.payment) == 2
         dividend, wht = sec.payment
-        # Gross = 10 shares x 0.25 USD, in the instrument currency
-        assert dividend.amount == Decimal("2.50")
-        assert dividend.amountCurrency == "USD"
+        # Tax stated in the account currency (EUR): gross = net credited + tax
+        assert dividend.amount == Decimal("2.68")
+        assert dividend.amountCurrency == "EUR"
         assert dividend.exchangeRate is None
         # Withholding kept in its own (EUR) currency, not as a CHF claim
         assert wht.amountCurrency == "EUR"

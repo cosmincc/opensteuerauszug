@@ -28,6 +28,7 @@ from opensteuerauszug.model.ech0196 import (
     TaxStatement,
 )
 
+from ._known_splits import KNOWN_SPLITS
 from ._converters import (
     T212_TYPE_TO_ECH,
     _CRYPTO_TYPES,
@@ -157,6 +158,22 @@ class Trading212Importer:
                     source="Trading212Importer",
                 )
             )
+        if parser.share_movements:
+            summary = ", ".join(
+                f"'{action}' ({count}x)" for action, count in sorted(parser.share_movements.items())
+            )
+            warnings.append(
+                CriticalWarning(
+                    category=CriticalWarningCategory.OTHER,
+                    message=(
+                        f"The Trading212 CSV contains share movements without cash: {summary}. "
+                        "Their quantities were applied to the holdings. A stock distribution can be "
+                        "taxable income (stock dividend) or part of a demerger or takeover; check "
+                        "how it must be declared."
+                    ),
+                    source="Trading212Importer",
+                )
+            )
         return warnings
 
     # ------------------------------------------------------------------
@@ -248,7 +265,7 @@ class Trading212Importer:
         # the CSV so that backward synthesis from today's position crosses
         # splits correctly (for the period the CSV covers).
         if api_all_orders is not None:
-            csv_splits = [o for o in orders if o.is_split]
+            csv_splits = [o for o in orders if o.is_split or o.is_share_movement]
             if csv_splits:
                 api_all_orders = list(api_all_orders) + csv_splits
         if current_positions and (
@@ -402,6 +419,13 @@ class Trading212Importer:
         # CSV/period (e.g. an accumulating ETF bought years ago).  Include every
         # ticker known from the live positions and the full order history so
         # their opening/closing balances are reported.
+        statement_warnings: List[CriticalWarning] = list(extra_warnings or [])
+        statement_warnings.extend(
+            self._apply_known_splits(
+                orders_by_ticker, recon_orders_by_ticker, current_pos_by_ticker
+            )
+        )
+
         all_tickers = set(orders_by_ticker) | set(dividends_by_ticker)
         if current_pos_by_ticker:
             all_tickers |= {
@@ -410,7 +434,6 @@ class Trading212Importer:
         if recon_orders_by_ticker:
             all_tickers |= set(recon_orders_by_ticker)
         instruments_dict = instrument_types or {}
-        statement_warnings: List[CriticalWarning] = list(extra_warnings or [])
         securities: List[Security] = []
 
         for position_counter, ticker in enumerate(sorted(all_tickers), start=1):
@@ -641,6 +664,87 @@ class Trading212Importer:
     # ------------------------------------------------------------------
     # Position reconstruction helpers
     # ------------------------------------------------------------------
+
+    def _apply_known_splits(
+        self,
+        orders_by_ticker: Dict[str, List[T212Order]],
+        recon_orders_by_ticker: Optional[Dict[str, List[T212Order]]],
+        current_pos_by_ticker: Optional[Dict[str, dict]],
+    ) -> List[CriticalWarning]:
+        """Insert well-known splits that the export / API history lacks.
+
+        Without an anchor (CSV mode) the holding before the split is replayed
+        forward from zero, so every split up to ``period_to`` matters.  With a
+        live-position anchor the holding is reconstructed backwards from today,
+        so only splits after ``period_from`` matter; the post-split holding is
+        today's position minus every later mutation.
+        """
+        warnings: List[CriticalWarning] = []
+        anchored = current_pos_by_ticker is not None
+        today = date.today()
+        tickers = set(orders_by_ticker) | set(recon_orders_by_ticker or {})
+        for ticker in sorted(tickers):
+            csv_orders = orders_by_ticker.get(ticker, [])
+            recon = (recon_orders_by_ticker or {}).get(ticker)
+            history = recon if recon else csv_orders
+            isins = {o.isin for o in [*csv_orders, *(recon or [])] if o.isin}
+            for split in KNOWN_SPLITS:
+                if not (split.isins & isins):
+                    continue
+                if anchored and not (self.period_from < split.effective <= today):
+                    continue
+                if not anchored and split.effective > self.period_to:
+                    continue
+                if any(
+                    o.is_split and abs((o.filled_at - split.effective).days) <= 3
+                    for o in [*csv_orders, *(recon or [])]
+                ):
+                    continue  # the export states this split itself
+                if anchored:
+                    pos = (current_pos_by_ticker or {}).get(ticker) or {}
+                    after = _position_quantity(pos) - sum(
+                        (_signed_qty(o) for o in history if o.filled_at >= split.effective),
+                        Decimal("0"),
+                    )
+                    before = after / split.ratio
+                else:
+                    before = sum(
+                        (_signed_qty(o) for o in history if o.filled_at < split.effective),
+                        Decimal("0"),
+                    )
+                if before <= 0:
+                    continue
+                added = before * (split.ratio - 1)
+                synthetic = T212Order(
+                    filled_at=split.effective,
+                    side="BUY",
+                    ticker=ticker,
+                    name=csv_orders[0].name if csv_orders else (recon or [history[0]])[0].name,
+                    isin=sorted(split.isins & isins)[0],
+                    quantity=added,
+                    price=Decimal("0"),
+                    currency=(history[0].currency if history else ""),
+                    fx_rate=None,
+                    total_account_currency=Decimal("0"),
+                    is_split=True,
+                )
+                orders_by_ticker[ticker].append(synthetic)
+                if recon_orders_by_ticker is not None and recon:
+                    recon_orders_by_ticker[ticker].append(synthetic)
+                warnings.append(
+                    CriticalWarning(
+                        category=CriticalWarningCategory.STOCK_SPLIT_MISMATCH,
+                        message=(
+                            f"{ticker}: the Trading212 data has no row for the {split.name} "
+                            f"{split.ratio}-for-1 split of {split.effective}. The importer added "
+                            f"{added} shares (holding {before} before the split). Check the "
+                            f"reported quantities against your Trading212 statement."
+                        ),
+                        source="Trading212Importer",
+                        identifier=ticker,
+                    )
+                )
+        return warnings
 
     def _add_boundary_balances(
         self,
@@ -943,3 +1047,7 @@ def _corporate_action_gap_warning(reason: str) -> CriticalWarning:
         ),
         source="Trading212Importer",
     )
+
+
+def _signed_qty(order: T212Order) -> Decimal:
+    return order.quantity if order.side == "BUY" else -order.quantity
