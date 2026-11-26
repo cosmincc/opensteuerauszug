@@ -907,6 +907,15 @@ class IbkrImporter:
                         logger.warning(f"Fees paid for {description} are ignored for statement.")
                         continue
 
+                    # Commission adjustments are corrections or rebates of trading
+                    # commissions, not income, even when linked to a security.
+                    if tx_type == ibflex.CashAction.COMMADJ:
+                        logger.warning(
+                            f"Commission adjustment {description} with amount {amount} "
+                            "is ignored for statement."
+                        )
+                        continue
+
                     if security_id:
                         tx_type_str = tx_type.value
                         tx_type_str_lower = str(tx_type_str).lower()
@@ -986,6 +995,14 @@ class IbkrImporter:
                         elif tx_type in [ibflex.CashAction.BROKERINTRCVD]:
                             # Tax relevant event. Fall through to create a bank payment.
                             pass
+                        elif tx_type in [ibflex.CashAction.BONDINTPAID]:
+                            # Accrued interest paid when buying a bond is normally linked
+                            # to the bond. Without a security it cannot be attributed and
+                            # is not income, so skip it instead of failing the import.
+                            logger.warning(
+                                f"Bond interest paid not linked to a security for {description} with amount {amount} is ignored for statement."
+                            )
+                            continue
                         elif tx_type in [ibflex.CashAction.WHTAX]:
                             # Withholding tax not linked to a security (e.g. credit interest or yield enhancement).
                             # IBKR is a non-Swiss broker and withholding on interest/SYEP is normally refunded

@@ -54,7 +54,7 @@ The importer uses the `ibflex` library to parse the XML, this can be quite sensi
 6.  **Cash Transactions (`CashTransactions`)**:
     *   Details all cash movements including dividends, interest, fees.
     *   Critical fields per transaction: `dateTime` (or `tradeDate`), `description`, `amount`, `currency`, `conid` (if linked to a security), `isin`, `symbol`, `type` (e.g., "Dividends", "Withholding Tax", "Interest", "Fees", "Deposits/Withdrawals").
-    *   *Note: "Deposits/Withdrawals" are generally ignored. "Fees" and "BrokerInterestPaid" are logged but not currently used to populate specific cost/liability sections in the Steuerauszug.* "BrokerInterestReceived" is processed as income.
+    *   *Note: "Deposits/Withdrawals" are generally ignored. "Fees" and "BrokerInterestPaid" are logged but not currently used to populate specific cost/liability sections in the Steuerauszug.* "BrokerInterestReceived" is processed as income. "Commission Adjustments" are ignored because they correct trading commissions and are not income. "Bond Interest Paid" without a linked security is ignored as well.
 
 7.  **Cash Report (`CashReport`)**:
     *   Summarizes cash balances for each currency held.

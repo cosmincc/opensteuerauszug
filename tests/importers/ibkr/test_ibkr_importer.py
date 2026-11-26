@@ -3124,3 +3124,48 @@ def test_bond_interest_import_succeeds(sample_ibkr_settings):
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
+
+
+SAMPLE_IBKR_FLEX_XML_COMMISSION_ADJUSTMENTS = """
+<FlexQueryResponse queryName="CommAdj" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="MSFT" description="MICROSOFT CORP" conid="272120" isin="US5949181045" currency="USD" position="10" markPrice="400.00" positionValue="4000.00" reportDate="2025-12-31" />
+      </OpenPositions>
+      <CashTransactions>
+        <CashTransaction accountId="U1234567" type="Commission Adjustments" currency="USD" amount="1.25" description="MSFT COMMISSION REBATE" conid="272120" symbol="MSFT" isin="US5949181045" dateTime="20250310;120000" assetCategory="STK" levelOfDetail="DETAIL" />
+        <CashTransaction accountId="U1234567" type="Commission Adjustments" currency="USD" amount="-0.50" description="COMMISSION ADJUSTMENT" conid="" symbol="" dateTime="20250410;120000" assetCategory="" levelOfDetail="DETAIL" />
+        <CashTransaction accountId="U1234567" type="Bond Interest Paid" currency="USD" amount="-12.00" description="ACCRUED INTEREST PAID" conid="" symbol="" dateTime="20250510;120000" assetCategory="" levelOfDetail="DETAIL" />
+      </CashTransactions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="0" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_commission_adjustments_and_unlinked_bond_interest_paid_are_not_income(
+    sample_ibkr_settings,
+):
+    importer = IbkrImporter(
+        period_from=date(2025, 1, 1),
+        period_to=date(2025, 12, 31),
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_COMMISSION_ADJUSTMENTS)
+        xml_file_path = tmp_file.name
+
+    try:
+        statement = importer.import_files([xml_file_path])
+        msft_sec = statement.listOfSecurities.depot[0].security[0]
+        assert msft_sec.payment == []
+        usd_account = statement.listOfBankAccounts.bankAccount[0]
+        assert usd_account.payment == []
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)
