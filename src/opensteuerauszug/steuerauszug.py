@@ -37,6 +37,7 @@ from .config.paths import (
     resolve_security_identifiers_file,
 )
 from .kursliste.__main__ import app as kursliste_app
+from .core.identifiers_cli import app as identifiers_app
 from typer.main import TyperGroup
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ class DefaultToProcess(TyperGroup):
 
 app = typer.Typer(cls=DefaultToProcess)
 app.add_typer(kursliste_app, name="kursliste")
+app.add_typer(identifiers_app, name="identifiers")
 
 
 class Phase(str, Enum):
@@ -151,6 +153,11 @@ def process(
         None,
         "--tax-year",
         help="Specify the tax year (e.g., 2023). If provided, period-from and period-to will default to the start/end of this year unless explicitly set. If period-from/to are set, they must fall within this tax year.",
+    ),
+    lookup_identifiers: bool = typer.Option(
+        False,
+        "--lookup-identifiers",
+        help="Look up ISIN/valor for imported securities that have neither (via OpenFIGI names matched against the Kursliste), ask for confirmation, and add them to the security identifiers CSV.",
     ),
     identifiers_csv_path_opt: Optional[str] = typer.Option(
         None,
@@ -688,6 +695,24 @@ def process(
                 identifiers_csv_path_opt
             )
             logger.debug(f"Using security identifiers CSV path: {effective_identifiers_csv_path}")
+
+            if lookup_identifiers:
+                from .core.identifiers_cli import lookup_and_record, unmapped_symbols
+
+                wanted_symbols = unmapped_symbols(statement)
+                if wanted_symbols:
+                    print(
+                        f"Looking up identifiers for {len(wanted_symbols)} security(ies) without ISIN or valor..."
+                    )
+                    try:
+                        lookup_and_record(
+                            wanted_symbols,
+                            tax_year=parsed_period_to.year,
+                            csv_path=effective_identifiers_csv_path,
+                            kursliste_dir=kursliste_dir,
+                        )
+                    except FileNotFoundError as e:
+                        print(f"Identifier lookup skipped: {e}")
 
             print(f"Attempting to load security identifiers from: {effective_identifiers_csv_path}")
             identifier_loader = SecurityIdentifierMapLoader(str(effective_identifiers_csv_path))

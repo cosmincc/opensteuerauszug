@@ -427,3 +427,25 @@ This `security_identifiers.csv` file is **optional**.
 *   The enrichment step will be skipped, and the program will continue to operate normally with the data as it was originally provided.
 
 This feature is particularly useful when your bank's export files do not consistently provide ISIN or Valor numbers for all securities, allowing you to maintain a supplementary list for complete data records.
+
+### Filling the file automatically
+
+Brokers that export ticker symbols only (Schwab, Fidelity, and others) need each symbol mapped once. Two commands can fill the file for you:
+
+```console
+# While processing: look up every imported security that has neither ISIN nor valor
+opensteuerauszug process <broker data> --importer <importer> --tax-year 2024 --lookup-identifiers
+
+# Standalone, for given tickers
+opensteuerauszug identifiers lookup --ticker AAPL --ticker TSM --tax-year 2024 [--currency USD]
+```
+
+For each symbol not yet in the file, the tool asks [OpenFIGI](https://www.openfigi.com/) for the company name behind the ticker (OpenFIGI does not publish ISINs), matches that name against the Kursliste for the tax year (download it first with `opensteuerauszug kursliste download --year 2024`), and shows up to three Kursliste entries with ISIN, valor, currency and a similarity score. **Nothing is written until you confirm**:
+
+*   a confident match asks `Use [1] for AAPL?` (Enter accepts);
+*   an uncertain one (similar names, share classes, ADRs) lists the candidates to pick from, or Enter to skip;
+*   `identifiers lookup --yes` accepts confident matches without asking and skips uncertain ones.
+
+Accepted rows are appended to this file, so later runs (and other brokers) reuse them without any network access. OpenFIGI answers are also cached for 180 days in the application data directory (`openfigi_cache.json`). Without an API key OpenFIGI allows roughly 250 tickers per minute; set `OPENFIGI_API_KEY` (free registration) or pass `--openfigi-api-key` for more.
+
+Only the ticker symbols are sent to OpenFIGI. Name matching is a heuristic: always check that the proposed security is the one you hold.
