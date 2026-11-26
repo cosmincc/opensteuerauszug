@@ -673,10 +673,14 @@ def process(
                 )
                 from .importers.revolut.revolut_importer import RevolutImporter
 
+                revolut_identifier_map = SecurityIdentifierMapLoader(
+                    str(resolve_security_identifiers_file(identifiers_csv_path_opt))
+                ).load_map()
                 revolut_importer = RevolutImporter(
                     period_from=parsed_period_from,
                     period_to=parsed_period_to,
                     account_settings_list=all_revolut_account_settings_models,
+                    identifier_map=revolut_identifier_map,
                 )
                 statement = revolut_importer.import_path(str(input_file))
                 print("Revolut import complete.")

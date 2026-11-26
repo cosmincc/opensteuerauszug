@@ -338,3 +338,21 @@ def test_same_second_duplicates_within_one_export_are_kept(tmp_path):
     aapl = _securities(_import(tmp_path, rows))["AAPL"]
 
     assert _balance(aapl, date(2025, 1, 1)) == Decimal(2)
+
+
+def test_identifiers_csv_supplies_isin_and_valor_and_config_takes_precedence(tmp_path):
+    identifier_map = {
+        "AAPL": {"isin": "US0378331005", "valor": 908440},
+        "MSFT": {"isin": "US5949181045", "valor": None},
+    }
+    settings = _settings(isin_map={"MSFT": "US5949181046"})
+    path = _write(tmp_path, HISTORY)
+
+    statement = RevolutImporter(
+        PERIOD_FROM, PERIOD_TO, [settings], identifier_map=identifier_map
+    ).import_path(path)
+
+    securities = _securities(statement)
+    assert securities["AAPL"].isin == "US0378331005"
+    assert securities["AAPL"].valorNumber == 908440
+    assert securities["MSFT"].isin == "US5949181046"

@@ -34,12 +34,13 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from opensteuerauszug.config.models import RevolutAccountSettings
 from opensteuerauszug.importers.common import (
@@ -61,6 +62,7 @@ from opensteuerauszug.model.ech0196 import (
     SecurityCategory,
     SecurityStock,
     TaxStatement,
+    ValorNumber,
 )
 from opensteuerauszug.model.position import SecurityPosition
 
@@ -167,7 +169,11 @@ class RevolutImporter:
         period_from: date,
         period_to: date,
         account_settings_list: list[RevolutAccountSettings],
+        identifier_map: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
+        """``identifier_map`` is the loaded security identifiers CSV
+        (``symbol -> {"isin": ..., "valor": ...}``); ``isin_map`` in the
+        account settings takes precedence over it."""
         self.period_from = period_from
         self.period_to = period_to
         self.account_settings_list = account_settings_list
@@ -188,6 +194,17 @@ class RevolutImporter:
         for ticker, isin in self._isin_map.items():
             if not _ISIN_RE.fullmatch(isin):
                 raise ValueError(f"Invalid ISIN {isin!r} for {ticker} in Revolut isin_map")
+        self._valor_map: dict[str, int] = {}
+        for symbol, ids in (identifier_map or {}).items():
+            key = symbol.strip().upper()
+            isin = (ids.get("isin") or "").strip().upper()
+            if isin and key not in self._isin_map:
+                if _ISIN_RE.fullmatch(isin):
+                    self._isin_map[key] = isin
+                else:
+                    logger.warning("Ignoring invalid ISIN %r for %s in identifiers CSV", isin, key)
+            if ids.get("valor"):
+                self._valor_map[key] = int(ids["valor"])
         self._rates: dict[str, Decimal] = dict(DEFAULT_WITHHOLDING_RATES)
         if self.settings:
             for key, rate in self.settings.dividend_withholding_rates.items():
@@ -369,6 +386,15 @@ class RevolutImporter:
             if not (has_mutation or has_balance or data["payments"]):
                 del positions[sec_pos]
 
+        unmapped = sorted({p.symbol for p in positions if p.isin is None})
+        if unmapped:
+            logger.warning(
+                "No ISIN known for Revolut ticker(s) %s. Add them to the security "
+                "identifiers CSV (symbol,isin,valor) or to isin_map in the account "
+                "settings so the Kursliste can value them.",
+                ", ".join(unmapped),
+            )
+
         statement = TaxStatement(
             minorVersion=1,
             periodFrom=self.period_from,
@@ -414,10 +440,12 @@ class RevolutImporter:
 
     def _sec_pos_for_ticker(self, ticker: str) -> SecurityPosition:
         isin = self._isin_map.get(ticker.upper())
+        valor = self._valor_map.get(ticker.upper())
         return SecurityPosition(
             depot=self._depot_id,
             symbol=ticker,
             isin=ISINType(isin) if isin else None,
+            valor=ValorNumber(valor) if valor else None,
             description=ticker,
         )
 

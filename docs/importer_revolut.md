@@ -78,7 +78,16 @@ bank_country = "LT"                   # custodian country (Revolut Securities Eu
 
 If no account is configured, the depot and account identifier default to `REVOLUT`.
 
-Instead of `isin_map` you can also add the tickers to the [security identifiers CSV](user_guide.md) (`symbol,isin,valor`), which is applied in the calculate phase. `isin_map` is preferred because the importer also uses the ISIN to pick the issuer country and the dividend withholding rate.
+### The shared security identifiers CSV
+
+Revolut exports tickers only. The importer also reads the shared [security identifiers CSV](config.md#security-identifier-enrichment) (`symbol,isin,valor`), the same file the Schwab and Fidelity importers use, so each ticker only needs to be mapped once for all brokers and years:
+
+```csv
+symbol,isin,valor
+AAPL,US0378331005,908440
+```
+
+`isin_map` in the account settings takes precedence over the CSV. Tickers with no ISIN from either source are listed in a warning during import.
 
 ## Running the Importer
 
