@@ -3124,3 +3124,48 @@ def test_bond_interest_import_succeeds(sample_ibkr_settings):
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
+
+
+# Flex query with the "Lot" option selected for OpenPositions: each holding is
+# reported once as a SUMMARY row and again split into LOT rows.
+SAMPLE_IBKR_FLEX_XML_OPEN_POSITION_WITH_LOTS = """
+<FlexQueryResponse queryName="OpenPositionLots" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2025-01-01" toDate="2025-12-31" period="Year" whenGenerated="2026-01-15T10:00:00">
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="MSFT" description="MICROSOFT CORP" conid="272120" isin="US5949181045" currency="USD" position="30" markPrice="400.00" positionValue="12000.00" reportDate="2025-12-31" levelOfDetail="SUMMARY" />
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="MSFT" description="MICROSOFT CORP" conid="272120" isin="US5949181045" currency="USD" position="10" markPrice="400.00" positionValue="4000.00" reportDate="2025-12-31" levelOfDetail="LOT" />
+        <OpenPosition accountId="U1234567" assetCategory="STK" symbol="MSFT" description="MICROSOFT CORP" conid="272120" isin="US5949181045" currency="USD" position="20" markPrice="400.00" positionValue="8000.00" reportDate="2025-12-31" levelOfDetail="LOT" />
+      </OpenPositions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="0" fromDate="2025-01-01" toDate="2025-12-31" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+
+def test_open_position_lot_rows_do_not_create_extra_closing_balances(sample_ibkr_settings):
+    importer = IbkrImporter(
+        period_from=date(2025, 1, 1),
+        period_to=date(2025, 12, 31),
+        account_settings_list=sample_ibkr_settings,
+    )
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
+        tmp_file.write(SAMPLE_IBKR_FLEX_XML_OPEN_POSITION_WITH_LOTS)
+        xml_file_path = tmp_file.name
+
+    try:
+        statement = importer.import_files([xml_file_path])
+        msft_sec = statement.listOfSecurities.depot[0].security[0]
+        closing_balances = [
+            s for s in msft_sec.stock if not s.mutation and s.referenceDate == date(2026, 1, 1)
+        ]
+        assert len(closing_balances) == 1
+        assert closing_balances[0].quantity == Decimal("30")
+        assert closing_balances[0].balance == Decimal("12000.00")
+    finally:
+        if os.path.exists(xml_file_path):
+            os.remove(xml_file_path)

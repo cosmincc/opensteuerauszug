@@ -40,6 +40,7 @@ The importer uses the `ibflex` library to parse the XML, this can be quite sensi
     *   Snapshot of securities held, typically at the end of the report period.
     *   Critical fields per position: `reportDate`, `symbol`, `description`, `assetCategory`, `conid`, `isin`, `position` (quantity), `currency`.
     *   For options/future options: `multiplier`
+    *   *Note: If the "Lot" option is selected, IBKR reports each holding once as a summary row and again split into `LOT` rows. The importer uses the summary row and ignores the `LOT` rows, so selecting both is fine.*
 
 4.  **Transfers (`Transfers`)**:
     *   Records securities transferred in or out of the account.

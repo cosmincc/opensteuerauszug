@@ -66,6 +66,17 @@ def is_summary_level(entry: object) -> bool:
     return str(level_value).upper() == "SUMMARY"
 
 
+def is_lot_level(entry: object) -> bool:
+    """Return True when an entry is marked with levelOfDetail LOT."""
+    level_of_detail = getattr(entry, "levelOfDetail", None)
+    if level_of_detail is None:
+        return False
+    level_value = (
+        level_of_detail.value if hasattr(level_of_detail, "value") else str(level_of_detail)
+    )
+    return str(level_value).upper() == "LOT"
+
+
 def should_skip_pseudo_account_entry(entry: object) -> bool:
     """Skip pseudo rows where accountId='-' or mapped-to-None SUMMARY rows."""
     # ibflex maps accountId="-" to None on some entry types, so
@@ -610,6 +621,12 @@ class IbkrImporter:
                 end_plus_one = self.period_to + timedelta(days=1)
                 for open_pos in stmt.OpenPositions:
                     if should_skip_entry(open_pos, "OpenPosition"):
+                        continue
+                    # With the "Lot" option selected, IBKR reports each holding
+                    # once as a SUMMARY row and again split into LOT rows. The
+                    # LOT rows are partial quantities of the same position and
+                    # must not be booked as additional closing balances.
+                    if is_lot_level(open_pos):
                         continue
                     # Ignore the reportDate from the Flex statement and
                     # use period end + 1 as reference date for the balance
